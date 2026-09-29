@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -194,4 +195,96 @@ func ParseMany(input string) ([]model.Node, error) {
 		return nil, fmt.Errorf("no valid nodes: %s", strings.Join(errs, "; "))
 	}
 	return out, nil
+}
+
+// URI returns a portable share URI for a node. Imported nodes retain their
+// original URI verbatim; nodes created through the JSON API are encoded from
+// their structured fields so they can also be exported and re-imported.
+func URI(n model.Node) (string, error) {
+	if strings.TrimSpace(n.URI) != "" {
+		return strings.TrimSpace(n.URI), nil
+	}
+	if n.Address == "" || n.Port <= 0 || n.Port > 65535 {
+		return "", fmt.Errorf("node %q has no valid server address", n.ID)
+	}
+	name := strings.TrimSpace(n.Name)
+	switch strings.ToLower(n.Type) {
+	case "socks5", "socks", "http":
+		u := &url.URL{Scheme: strings.ToLower(n.Type), Host: net.JoinHostPort(n.Address, strconv.Itoa(n.Port)), Fragment: name}
+		if n.UUID != "" {
+			u.User = url.UserPassword(n.UUID, n.Password)
+		}
+		return u.String(), nil
+	case "trojan":
+		u := &url.URL{Scheme: "trojan", Host: net.JoinHostPort(n.Address, strconv.Itoa(n.Port)), Fragment: name}
+		if n.Password != "" {
+			u.User = url.User(n.Password)
+		}
+		addCommonQuery(u, n)
+		return u.String(), nil
+	case "vless":
+		u := &url.URL{Scheme: "vless", Host: net.JoinHostPort(n.Address, strconv.Itoa(n.Port)), Fragment: name}
+		u.User = url.User(n.UUID)
+		addCommonQuery(u, n)
+		return u.String(), nil
+	case "vmess":
+		payload := map[string]any{"v": "2", "ps": n.Name, "add": n.Address, "port": n.Port, "id": n.UUID, "net": n.Network, "host": n.Host, "path": n.Path}
+		if n.TLS {
+			payload["tls"] = "tls"
+		}
+		if n.SNI != "" {
+			payload["sni"] = n.SNI
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return "", err
+		}
+		return "vmess://" + base64.RawStdEncoding.EncodeToString(b), nil
+	case "shadowsocks":
+		if n.Method == "" || n.Password == "" {
+			return "", fmt.Errorf("shadowsocks node %q has no method or password", n.ID)
+		}
+		u := &url.URL{Scheme: "ss", Host: net.JoinHostPort(n.Address, strconv.Itoa(n.Port)), Fragment: name}
+		u.User = url.UserPassword(n.Method, n.Password)
+		return u.String(), nil
+	default:
+		return "", fmt.Errorf("unsupported node protocol %q", n.Type)
+	}
+}
+
+func addCommonQuery(u *url.URL, n model.Node) {
+	q := u.Query()
+	if n.Network != "" {
+		q.Set("type", n.Network)
+	}
+	if n.Flow != "" {
+		q.Set("flow", n.Flow)
+	}
+	if n.TLS {
+		q.Set("security", "tls")
+	}
+	if n.SNI != "" {
+		q.Set("sni", n.SNI)
+	}
+	if n.RealityPublicKey != "" {
+		q.Set("security", "reality")
+		q.Set("pbk", n.RealityPublicKey)
+	}
+	if n.RealityShortID != "" {
+		q.Set("sid", n.RealityShortID)
+	}
+	if n.Fingerprint != "" {
+		q.Set("fp", n.Fingerprint)
+	}
+	if n.Host != "" {
+		q.Set("host", n.Host)
+	}
+	if n.Path != "" {
+		if strings.EqualFold(n.Network, "grpc") {
+			q.Set("serviceName", n.Path)
+		} else {
+			q.Set("path", n.Path)
+		}
+	}
+	u.RawQuery = q.Encode()
 }

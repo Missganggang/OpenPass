@@ -217,6 +217,30 @@ func (s *Store) DeleteNode(id string) error {
 	}
 	return os.ErrNotExist
 }
+
+// UpdateNode applies a small in-place update while preserving credentials and
+// transport fields that are intentionally omitted by PATCH requests.
+func (s *Store) UpdateNode(id string, fn func(*model.Node) error) (model.Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.data.Nodes {
+		if s.data.Nodes[i].ID != id {
+			continue
+		}
+		candidate := s.data.Nodes[i]
+		if err := fn(&candidate); err != nil {
+			return model.Node{}, err
+		}
+		candidate.UpdatedAt = time.Now()
+		s.data.Nodes[i] = candidate
+		if err := s.saveLocked(); err != nil {
+			return model.Node{}, err
+		}
+		return s.data.Nodes[i], nil
+	}
+	return model.Node{}, os.ErrNotExist
+}
+
 func (s *Store) UpdateSettings(v model.Settings) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

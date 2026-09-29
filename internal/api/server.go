@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,7 @@ type Server struct {
 }
 
 func New(s *store.Store) *Server {
-	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.1"}
+	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.2"}
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 
@@ -316,6 +317,12 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 		}
 		return methodErr()
 	}
+	if parts[0] == "export" {
+		if r.Method != http.MethodGet {
+			return methodErr()
+		}
+		return s.exportNodes(w, r)
+	}
 	if parts[0] == "import" {
 		if r.Method != http.MethodPost {
 			return methodErr()
@@ -332,7 +339,35 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 	if r.Method == http.MethodDelete {
 		return s.Store.DeleteNode(id)
 	}
-	if r.Method == http.MethodPatch || r.Method == http.MethodPut {
+	if r.Method == http.MethodPatch {
+		var body map[string]json.RawMessage
+		if e := decode(r, &body); e != nil {
+			return e
+		}
+		x, e := s.Store.UpdateNode(id, func(n *model.Node) error {
+			if raw, ok := body["name"]; ok {
+				if err := json.Unmarshal(raw, &n.Name); err != nil {
+					return err
+				}
+			}
+			if raw, ok := body["remark"]; ok {
+				if err := json.Unmarshal(raw, &n.Remark); err != nil {
+					return err
+				}
+			}
+			if raw, ok := body["enabled"]; ok {
+				if err := json.Unmarshal(raw, &n.Enabled); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if e == nil {
+			writeJSON(w, x)
+		}
+		return e
+	}
+	if r.Method == http.MethodPut {
 		var n model.Node
 		if e := decode(r, &n); e != nil {
 			return e
@@ -345,6 +380,35 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 		return e
 	}
 	return methodErr()
+}
+
+func (s *Server) exportNodes(w http.ResponseWriter, r *http.Request) error {
+	ns := s.Store.Nodes()
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "uri"
+	}
+	switch format {
+	case "json":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="openpass-nodes.json"`)
+		return json.NewEncoder(w).Encode(ns)
+	case "uri", "text", "txt":
+		lines := make([]string, 0, len(ns))
+		for _, n := range ns {
+			u, err := nodes.URI(n)
+			if err != nil {
+				return fmt.Errorf("export node %q: %w", n.ID, err)
+			}
+			lines = append(lines, u)
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="openpass-nodes.txt"`)
+		_, err := io.WriteString(w, strings.Join(lines, "\n"))
+		return err
+	default:
+		return &httpError{http.StatusBadRequest, "format must be uri or json"}
+	}
 }
 func (s *Server) importNodes(w http.ResponseWriter, r *http.Request) error {
 	var body struct {
@@ -475,14 +539,27 @@ func (s *Server) config(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) discoverDevices() {
 	s.discoverMu.Lock()
 	defer s.discoverMu.Unlock()
-	type seenDevice struct{ mac, ip, hostname string }
+	type seenDevice struct {
+		mac, ip, hostname string
+		// online is deliberately based on a live neighbour entry. A DHCP
+		// lease can remain in /tmp/dhcp.leases for hours after a client has
+		// gone away, so the lease alone must never make a device online.
+		online bool
+	}
 	seen := map[string]seenDevice{}
+	now := time.Now()
 	if f, err := os.Open("/tmp/dhcp.leases"); err == nil {
 		defer f.Close()
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
 			parts := strings.Fields(sc.Text())
 			if len(parts) < 3 {
+				continue
+			}
+			// dnsmasq writes: expiry mac ip hostname client-id. Ignore an
+			// expired lease, but retain a zero expiry (static/infinite lease)
+			// as an address hint until the neighbour table confirms activity.
+			if expiry, ok := parseLeaseExpiry(parts[0]); ok && !leaseActive(expiry, now) {
 				continue
 			}
 			mac := normalizeMAC(parts[1])
@@ -507,7 +584,9 @@ func (s *Server) discoverDevices() {
 		}
 		for _, line := range strings.Split(string(out), "\n") {
 			parts := strings.Fields(line)
-			if len(parts) < 5 {
+			// `ip neigh show dev br-lan` omits the `dev br-lan` tokens,
+			// leaving four fields for a normal address/lladdr/state line.
+			if len(parts) < 4 {
 				continue
 			}
 			ip, mac := parts[0], ""
@@ -521,9 +600,19 @@ func (s *Server) discoverDevices() {
 			if parsedIP == nil || parsedIP.To4() == nil || mac == "" {
 				continue
 			}
-			if _, ok := seen[mac]; !ok {
-				seen[mac] = seenDevice{mac: mac, ip: ip}
+			state := neighborState(parts)
+			if !neighborUsable(state) {
+				continue
 			}
+			v := seen[mac]
+			v.mac, v.ip, v.online = mac, ip, true
+			// STALE means that the kernel has not heard from this address
+			// recently. Probe it once so an idle but connected client can be
+			// refreshed, while an abandoned stale entry becomes offline.
+			if state == "STALE" {
+				v.online = probeLANNeighbor(ip)
+			}
+			seen[mac] = v
 		}
 	}
 	existing := s.Store.Devices()
@@ -542,7 +631,20 @@ func (s *Server) discoverDevices() {
 			d.Mode = s.Store.Settings().DefaultMode
 			d.FirstSeen = time.Now()
 		}
-		d.MAC, d.IP, d.Hostname, d.Online, d.LastSeen = v.mac, v.ip, v.hostname, true, time.Now()
+		if v.mac != "" {
+			d.MAC = v.mac
+		}
+		if v.ip != "" {
+			d.IP = v.ip
+		}
+		if v.hostname != "" {
+			d.Hostname = v.hostname
+		}
+		if v.online {
+			d.Online, d.LastSeen = true, now
+		} else {
+			d.Online = false
+		}
 		if _, err := s.Store.UpsertDevice(d); err != nil {
 			continue
 		}
@@ -560,6 +662,65 @@ func normalizeMAC(v string) string {
 		v = strings.ReplaceAll(v, "-", ":")
 	}
 	return v
+}
+
+// parseLeaseExpiry parses the first field in a dnsmasq lease line. Older
+// dnsmasq versions may write a non-numeric value while rotating the file; in
+// that case the lease is retained as an address hint and still needs a live
+// neighbour entry before it can be shown online.
+func parseLeaseExpiry(v string) (time.Time, bool) {
+	seconds, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || seconds < 0 {
+		return time.Time{}, false
+	}
+	if seconds == 0 {
+		return time.Time{}, true // static/infinite lease
+	}
+	return time.Unix(seconds, 0), true
+}
+
+func leaseActive(expiry time.Time, now time.Time) bool {
+	return expiry.IsZero() || expiry.After(now)
+}
+
+// neighborState extracts the NUD state from `ip neigh` output. The state is
+// normally the final token, but looking for the known values makes this work
+// with both iproute2 and BusyBox output formats.
+func neighborState(parts []string) string {
+	for _, p := range parts {
+		state := strings.ToUpper(strings.TrimSpace(p))
+		switch state {
+		case "REACHABLE", "STALE", "DELAY", "PROBE", "FAILED", "INCOMPLETE", "PERMANENT", "NOARP", "NONE":
+			return state
+		}
+	}
+	return ""
+}
+
+func neighborUsable(state string) bool {
+	switch state {
+	case "REACHABLE", "STALE", "DELAY", "PROBE":
+		return true
+	default:
+		return false
+	}
+}
+
+// probeLANNeighbor refreshes a stale neighbour entry. This avoids treating a
+// client as offline merely because it has been idle long enough for the
+// kernel to move its ARP entry to STALE. A failed probe is intentionally
+// considered offline, which clears stale clients from the online list.
+func probeLANNeighbor(ip string) bool {
+	if net.ParseIP(ip) == nil {
+		return false
+	}
+	ping, err := exec.LookPath("ping")
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, ping, "-c", "1", "-W", "1", ip).Run() == nil
 }
 
 func newPassword() string {

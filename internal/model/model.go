@@ -18,8 +18,12 @@ type Device struct {
 }
 
 type Node struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Remark is an operator supplied note (for example, the provider or
+	// intended location). It is kept separately from Name so imports can keep
+	// their display label while administrators annotate a node.
+	Remark           string    `json:"remark,omitempty"`
 	Type             string    `json:"type"`
 	Address          string    `json:"address"`
 	Port             int       `json:"port,omitempty"`

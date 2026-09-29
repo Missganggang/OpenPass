@@ -41,17 +41,18 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.1 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.2 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
 
 - DoH 预设：阿里、腾讯、Cloudflare、Google；可按设备选择 DNS。
-- 在线、离线、隐藏设备管理，展示内网 IP 和 MAC；支持节点绑定、解除绑定、直连和阻断。
+- 在线、离线、隐藏设备管理，展示内网 IP 和 MAC；在线状态按 DHCP 租约和实时邻居状态更新；支持节点绑定、解除绑定、直连和阻断。
 - VLESS、VMess、Trojan、Shadowsocks、SOCKS5 节点导入，批量导入和订阅导入。
+- 节点支持备注、URI 链接导出和 JSON 配置导出（导出文件包含节点凭据，请妥善保存）。
 - Ping、TCPing、通过节点执行 URL 测试；国内/海外测试地址可修改。
 - 全局代理、代理失败断网保护；新设备默认策略可切换为直连或阻断。
-- 设备自助页展示访问设备的信息和绑定情况，允许设备选择可用节点。
+- 设备自助页展示访问设备的信息和绑定情况，允许设备选择可用节点；代理设备未单独指定 DNS 时默认使用 Cloudflare DoH，并通过绑定节点发送。
 
 Ping/TCPing 只验证服务器的 ICMP/TCP 连通性，URL 测试才会验证节点协议和代理访问。部分服务器禁用 ICMP，Ping 超时并不代表节点不可用。
 
@@ -110,7 +111,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.1
+make packages VERSION=0.1.2
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS

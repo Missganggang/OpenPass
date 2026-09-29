@@ -2,7 +2,7 @@
 # Build a static, self-contained OpenWrt release archive.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${VERSION:-0.1.1}
+VERSION=${VERSION:-0.1.2}
 ARCH=${ARCH:-amd64}
 GO=${GO:-go}
 OUT_DIR=${OUT_DIR:-$ROOT/dist}

@@ -33,21 +33,28 @@ func TestProxyDNSUsesBoundNodeAndSeparateBootstrap(t *testing.T) {
 		servers[server["tag"].(string)] = server
 	}
 	rules := dns["rules"].([]any)
+	first := rules[0].(map[string]any)
+	if first["action"] != "reject" {
+		t.Fatal("unmapped IPv6 DNS must fail closed", first)
+	}
+	if inbound := first["inbound"].([]any); len(inbound) != 1 || inbound[0] != "dns-local-v6" {
+		t.Fatal("IPv6 DNS guard must target the local-v6 listener", first)
+	}
 	for i, node := range []string{"one", "two"} {
-		rule := rules[i].(map[string]any)
+		rule := rules[i+1].(map[string]any)
 		server := servers[rule["server"].(string)]
 		if server["detour"] != node || server["type"] != "https" || server["server"] != "223.5.5.5" {
 			t.Fatalf("device DNS escaped node %s: %v", node, server)
 		}
 	}
-	if rules[0].(map[string]any)["server"] == rules[1].(map[string]any)["server"] {
+	if rules[1].(map[string]any)["server"] == rules[2].(map[string]any)["server"] {
 		t.Fatal("different proxy devices share a resolver outbound")
 	}
-	direct := servers[rules[2].(map[string]any)["server"].(string)]
+	direct := servers[rules[3].(map[string]any)["server"].(string)]
 	if direct["detour"] != nil {
 		t.Fatal("direct device DNS must remain direct", direct)
 	}
-	for _, raw := range rules[3:] {
+	for _, raw := range rules[4:] {
 		if raw.(map[string]any)["action"] != "reject" {
 			t.Fatal("blocked/missing proxy leaked DNS", raw)
 		}
@@ -58,6 +65,29 @@ func TestProxyDNSUsesBoundNodeAndSeparateBootstrap(t *testing.T) {
 	}
 	if dns["independent_cache"] != true {
 		t.Fatal("DNS cache must be isolated per outbound resolver")
+	}
+}
+
+func TestUnspecifiedProxyDNSDefaultsOverseas(t *testing.T) {
+	st := model.State{Settings: model.DefaultSettings(), Nodes: []model.Node{{ID: "node", Type: "socks5", Address: "node.example", Port: 1080, Enabled: true}}, Devices: []model.Device{{IP: "10.0.0.30", Mode: "proxy", NodeID: "node"}}}
+	st.Settings.DefaultDNS = "aliyun"
+	b, err := Build(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	servers := map[string]map[string]any{}
+	for _, raw := range cfg["dns"].(map[string]any)["servers"].([]any) {
+		server := raw.(map[string]any)
+		servers[server["tag"].(string)] = server
+	}
+	rule := cfg["dns"].(map[string]any)["rules"].([]any)[1].(map[string]any)
+	server := servers[rule["server"].(string)]
+	if server["detour"] != "node" || server["server"] != "1.1.1.1" {
+		t.Fatalf("unspecified proxy DNS must use Cloudflare through the node: %#v", server)
 	}
 }
 

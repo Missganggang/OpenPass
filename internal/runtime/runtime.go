@@ -297,6 +297,11 @@ func firewallPolicy(st model.State) string {
 		// Keep SSH, LuCI and self-service reachable even when a proxy fails.
 		// The normal fw4 input chain still controls access to router services;
 		// the separate DNS NAT chain continues to intercept port 53.
+		// Do not let the local-destination exception bypass the IPv6 DNS
+		// guard.  Link-local IPv6 DNS has no IPv4 device identity and must
+		// fail closed rather than fall through to the router/WAN resolver.
+		b.WriteString("add rule inet fw4 openpass_prerouting iifname \"br-lan\" meta nfproto ipv6 udp dport 53 drop\n")
+		b.WriteString("add rule inet fw4 openpass_prerouting iifname \"br-lan\" meta nfproto ipv6 tcp dport 53 drop\n")
 		b.WriteString("add rule inet fw4 openpass_prerouting fib daddr type local accept\n")
 		b.WriteString("add rule inet fw4 openpass_prerouting ip saddr @blocked_clients drop\n")
 		// A proxy client must never escape over normal WAN forwarding, even

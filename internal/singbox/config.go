@@ -28,13 +28,28 @@ func Build(st model.State) ([]byte, error) {
 		}
 	}
 	dnsRules := make([]any, 0)
+	// A LAN client can send DNS from a link-local IPv6 address.  The device
+	// inventory currently keys bindings by IPv4, so there is no safe way to
+	// associate that packet with the selected node.  Reject the IPv6 listener
+	// by default instead of allowing it to fall through to the default (often
+	// domestic) resolver.  Clients will use their IPv4 DNS path, which is
+	// mapped to the per-device DoH detour above.
+	dnsRules = append(dnsRules, map[string]any{"inbound": []string{"dns-local-v6"}, "action": "reject"})
 	for _, d := range st.Devices {
 		if d.IP == "" {
 			continue
 		}
 		profile := d.DNS
 		if profile == "" {
-			profile = st.Settings.DefaultDNS
+			// A proxy binding created from the self-service page does not
+			// choose a DNS profile. Keep that traffic on an overseas resolver
+			// by default; an administrator can still explicitly select Aliyun
+			// or another profile for a device in the management page.
+			if d.Mode == "proxy" && st.Settings.ProxyDNS {
+				profile = "cloudflare"
+			} else {
+				profile = st.Settings.DefaultDNS
+			}
 		}
 		server := dnsProfile(profile, st.DNS)
 		tag, _ := server["tag"].(string)

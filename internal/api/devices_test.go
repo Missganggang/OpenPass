@@ -56,3 +56,46 @@ func TestAdminNonProxyModeClearsBinding(t *testing.T) {
 		})
 	}
 }
+
+func TestNodeRemarkPatchAndExport(t *testing.T) {
+	s, _ := selfFixture(t)
+	if _, err := s.Store.UpsertNode(model.Node{ID: "node1", Name: "Test", Type: "socks5", Address: "127.0.0.1", Port: 1080, UUID: "u", Password: "p", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Store.DeleteNode("disabled")
+	_ = s.Store.DeleteNode("available")
+	if _, err := s.Store.UpsertNode(model.Node{ID: "disabled", Name: "Disabled", Type: "socks5", Address: "127.0.0.2", Port: 1081, Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPatch, "/api/nodes/node1", strings.NewReader(`{"remark":"海外主节点"}`)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "海外主节点") {
+		t.Fatalf("remark patch status=%d body=%s", w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/nodes/export?format=uri", nil))
+	if w.Code != http.StatusOK || w.Header().Get("Content-Disposition") == "" || !strings.Contains(w.Body.String(), "socks5://u:p@127.0.0.1:1080") || !strings.Contains(w.Body.String(), "socks5://127.0.0.2:1081") {
+		t.Fatalf("URI export status=%d body=%s", w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/nodes/export?format=json", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "海外主节点") {
+		t.Fatalf("JSON export status=%d body=%s", w.Code, w.Body)
+	}
+	var exported []model.Node
+	err := json.Unmarshal(w.Body.Bytes(), &exported)
+	var exportedNode *model.Node
+	for i := range exported {
+		if exported[i].ID == "node1" {
+			exportedNode = &exported[i]
+			break
+		}
+	}
+	if err != nil || len(exported) != 2 || exportedNode == nil || exportedNode.Password != "p" {
+		t.Fatalf("JSON export lost credentials: %#v err=%v", exported, err)
+	}
+	ns := s.Store.Nodes()
+	if len(ns) != 2 || ns[0].Remark != "海外主节点" || ns[0].Password != "p" {
+		t.Fatalf("PATCH did not preserve node fields: %#v", ns)
+	}
+}
