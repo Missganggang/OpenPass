@@ -41,7 +41,7 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.8 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.9 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
@@ -51,6 +51,7 @@ OPENPASS_VERSION=v0.1.8 sh /tmp/openpass-install.sh
 - 释放设备会删除 OpenPass 的设备记录及绑定，并立即清除对应策略；不修改 DHCP 租约或强制设备更换 IP。仍在线的设备会按新设备默认策略重新识别，离线设备不会仅因旧租约立即重建。
 - VLESS、VMess、Trojan、Shadowsocks、SOCKS5 节点导入，批量导入和订阅导入。
 - 节点支持备注、URI 链接导出和 JSON 配置导出（导出文件包含节点凭据，请妥善保存）。
+- 删除节点前检查全部设备绑定，包括离线和隐藏设备；仍有绑定时列出设备并提示先解绑，无绑定时直接删除。清空节点列表后设备管理仍可正常使用。
 - Ping、TCPing、通过节点执行 URL 测试；国内/海外测试地址可修改。
 - 全局代理、代理失败断网保护；新设备默认策略可切换为直连或阻断。
 - 设备自助页展示访问设备的信息、设备备注和绑定情况，节点选择列表显示节点备注；切换到代理且未指定 DNS 时默认使用 Cloudflare DoH，并通过绑定节点发送，切回直连则默认阿里 DoH。
@@ -118,7 +119,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.8
+make packages VERSION=0.1.9
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS

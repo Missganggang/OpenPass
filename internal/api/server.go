@@ -37,7 +37,7 @@ type Server struct {
 }
 
 func New(s *store.Store) *Server {
-	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.8"}
+	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.9"}
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 
@@ -498,7 +498,26 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 		return s.testNode(w, r, id)
 	}
 	if r.Method == http.MethodDelete {
-		return s.Store.DeleteNode(id)
+		// Serialize with device binding so a validated node cannot disappear
+		// before the device policy is saved and applied.
+		s.discoverMu.Lock()
+		defer s.discoverMu.Unlock()
+		if err := s.Store.DeleteNode(id); err != nil {
+			var inUse *store.NodeInUseError
+			if errors.As(err, &inUse) {
+				w.WriteHeader(http.StatusConflict)
+				writeJSON(w, map[string]any{"error": inUse.Error(), "bound_devices": inUse.Devices})
+				return nil
+			}
+			return err
+		}
+		if s.Runtime != nil {
+			if err := s.Runtime.Apply(s.Store.State()); err != nil {
+				return &httpError{http.StatusInternalServerError, fmt.Sprintf("节点已删除，但配置重载失败：%v", err)}
+			}
+		}
+		writeJSON(w, map[string]any{"deleted": true, "id": id})
+		return nil
 	}
 	if r.Method == http.MethodPatch {
 		var body map[string]json.RawMessage

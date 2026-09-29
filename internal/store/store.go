@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,7 +121,7 @@ func (s *Store) Devices() []model.Device {
 func (s *Store) Nodes() []model.Node {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return append([]model.Node(nil), s.data.Nodes...)
+	return append([]model.Node{}, s.data.Nodes...)
 }
 func (s *Store) Settings() model.Settings { s.mu.RLock(); defer s.mu.RUnlock(); return s.data.Settings }
 func (s *Store) DNS() []model.DNS {
@@ -245,13 +246,36 @@ func (s *Store) UpsertNode(n model.Node) (model.Node, error) {
 	s.data.Nodes = append(s.data.Nodes, n)
 	return n, s.saveLocked()
 }
+
+// NodeInUseError includes every referring device, including offline/hidden
+// clients. The reference check and deletion share the store's write lock.
+type NodeInUseError struct{ Devices []model.Device }
+
+func (e *NodeInUseError) Error() string {
+	return fmt.Sprintf("该节点仍被 %d 台设备绑定，请先解绑设备后再删除", len(e.Devices))
+}
+
 func (s *Store) DeleteNode(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, n := range s.data.Nodes {
 		if n.ID == id {
+			var bound []model.Device
+			for _, device := range s.data.Devices {
+				if device.NodeID == id {
+					bound = append(bound, device)
+				}
+			}
+			if len(bound) > 0 {
+				return &NodeInUseError{Devices: bound}
+			}
+			previous := append([]model.Node{}, s.data.Nodes...)
 			s.data.Nodes = append(s.data.Nodes[:i], s.data.Nodes[i+1:]...)
-			return s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data.Nodes = previous
+				return err
+			}
+			return nil
 		}
 	}
 	return os.ErrNotExist

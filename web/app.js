@@ -8,7 +8,7 @@
     page: 'dashboard', deviceTab: 'online', nodeFilter: 'all',
     devices: [], allDevices: [], nodes: [], settings: {}, dns: [], status: {},
     standalone: /^\/(choose|self)\/?$/.test(location.pathname),
-    self: null, selfMode: null, selfLoading: false, pendingProxy: new Set(),
+    self: null, selfMode: null, selfLoading: false, pendingProxy: new Set(), deletingNodes: new Set(),
     demo: false
   };
 
@@ -81,7 +81,7 @@
     const text = await response.text();
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch (_) { /* Error responses may be plain text. */ }
-    if (!response.ok) { const error = new Error(data.error || data.message || text.trim() || `HTTP ${response.status}`); error.status = response.status; throw error; }
+    if (!response.ok) { const error = new Error(data?.error || data?.message || text.trim() || `HTTP ${response.status}`); error.status = response.status; error.data = data; throw error; }
     return data;
   }
 
@@ -91,6 +91,7 @@
     setTimeout(() => item.remove(), 3300);
   }
   function esc(value) { return String(value == null ? '' : value).replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c])); }
+  function responseList(payload, key) { const list = Array.isArray(payload) ? payload : payload?.[key]; return Array.isArray(list) ? list.filter(item => item && typeof item === 'object') : []; }
   function findNode(id) { return state.nodes.find(n => String(n.id) === String(id)); }
   function nodeLabel(node) { return [node?.name || node?.address || node?.type || '代理节点', node?.remark].filter(Boolean).join(' · '); }
   function nodeName(id) { return findNode(id)?.name || (id ? '节点已删除' : '未绑定节点'); }
@@ -110,8 +111,8 @@
   async function loadData(throwOnError = false) {
     try {
       const [devices, allDevices, nodes, settings, dns, status] = await Promise.all([api('/devices'), api('/devices?hidden=all').catch(() => null), api('/nodes'), api('/settings'), api('/dns').catch(() => demoDns), api('/status')]);
-      state.devices = Array.isArray(devices) ? devices : (devices.devices || []); const everyDevice = allDevices ? (Array.isArray(allDevices) ? allDevices : (allDevices.devices || [])) : state.devices;
-      state.nodes = (Array.isArray(nodes) ? nodes : (nodes.nodes || [])).map(n => ({ ...n, test_results: findNode(n.id)?.test_results })); state.settings = settings || {}; state.dns = Array.isArray(dns) ? dns : demoDns;
+      state.devices = responseList(devices, 'devices'); const everyDevice = allDevices ? responseList(allDevices, 'devices') : state.devices;
+      state.nodes = responseList(nodes, 'nodes').map(n => ({ ...n, test_results: findNode(n.id)?.test_results })); state.settings = settings || {}; state.dns = Array.isArray(dns) ? responseList(dns) : demoDns;
       state.allDevices = everyDevice;
       state.status = status || {};
       if (state.settings.enabled != null) state.status.enabled = state.settings.enabled;
@@ -149,14 +150,14 @@
   function renderSelf() {
     const data = state.self || {};
     const device = data.device;
-    const nodes = (data.nodes || []).filter(n => n.enabled !== false);
+    const nodes = responseList(data, 'nodes').filter(n => n.enabled !== false);
     const identified = !!(device?.ip && device?.mac) && data.can_bind !== false;
     $('#selfPreviewDevice').textContent = device?.hostname || '当前访问设备';
     $('#selfDeviceIP').textContent = device?.ip || data.ip || '未识别';
     $('#selfDeviceMAC').textContent = device?.mac || '未识别';
     $('#selfDeviceRemark').textContent = device?.remark || '暂无备注';
     $('#selfCurrentMode').textContent = device ? ({ proxy: '代理节点', direct: '本地直连', blocked: '禁止网络' }[device.mode] || '未设置') : '未识别';
-    const boundNode = (data.nodes || []).find(n => n.id === device?.node_id);
+    const boundNode = responseList(data, 'nodes').find(n => n.id === device?.node_id);
     $('#selfCurrentNode').textContent = device?.mode === 'proxy' && device.node_id ? (boundNode ? nodeLabel(boundNode) : '节点已删除或停用') : '未绑定';
     const enabled = data.enabled ?? data.protection_enabled ?? state.settings.enabled;
     const inactive = enabled === false || data.kernel_running === false;
@@ -199,7 +200,7 @@
 
   function renderAll() { renderStatus(); renderDashboard(); renderDevices(); renderNodes(); renderSettings(); renderDns(); navigate(state.page); }
   function renderStatus() {
-    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.8').replace(/^v/, '')}`;
+    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.9').replace(/^v/, '')}`;
     const online = state.allDevices.filter(d => d.online && !d.hidden).length; const proxied = state.allDevices.filter(d => d.mode === 'proxy' && !d.hidden).length; const healthy = state.nodes.filter(n => nodeURLResult(n) === true && n.enabled !== false).length;
     $('#metricOnline').textContent = online; $('#metricProxied').textContent = proxied; $('#metricNodes').textContent = healthy; $('#onlineBadge').textContent = online; $('#nodesBadge').textContent = state.nodes.length; $('#onlineCount').textContent = online; $('#offlineCount').textContent = state.allDevices.filter(d => !d.online && !d.hidden).length; $('#hiddenCount').textContent = state.allDevices.filter(d => d.hidden).length; $('#hiddenTabCount').textContent = state.allDevices.filter(d => d.hidden).length;
     $('#metricDns').textContent = state.settings.default_dns ? dnsName(state.settings.default_dns) : 'DoH 安全'; $('#metricDnsSub').textContent = state.settings.force_doh === false ? '加密解析未强制' : 'DoH 加密解析'; $('#kernelVersion').textContent = state.status.kernel || state.status.version || 'sing-box 运行中'; $('#routerAddress').textContent = state.status.router || 'OpenWrt · 10.0.0.1';
@@ -257,7 +258,7 @@
       const label = node.testing ? `${testLabels[node.testing]} 检测中` : urlOK === true ? 'URL 通过' : urlOK === false ? 'URL 失败' : '待 URL 测试';
       const statusClass = urlOK === false ? 'bad' : urlOK === true ? '' : 'off';
       const actions = ['ping', 'tcp', 'url'].map(type => `<button class="row-action test-action" data-action="test-node" data-test-type="${type}" data-id="${esc(node.id)}" title="${testLabels[type]} 测试" ${node.testing ? 'disabled' : ''}>${testLabels[type]}</button>`).join('');
-      return `<tr><td><div class="device-cell"><span class="device-avatar">◈</span><span class="device-name">${esc(node.name || node.address)}${node.remark ? `<small class="node-remark">备注：${esc(node.remark)}</small>` : ''}<small>${esc(node.address || '')}:${esc(node.port || '')}</small></span></div></td><td><span class="protocol-badge ${esc(node.type || '')}">${esc(node.type || 'unknown')}</span></td><td><span class="latency">${result?.ok ? `${esc(result.latency_ms)} ms` : '—'}</span><small class="test-caption">代理 URL 延迟</small></td><td><span class="status-label ${statusClass}"><i></i>${label}</span><div class="node-test-results">${nodeTestSummary(node)}</div></td><td class="muted">${esc(node.last_test ? timeText(node.last_test) : '—')}</td><td class="align-right"><span class="row-actions"><button class="row-action" data-action="remark-node" data-id="${esc(node.id)}" title="编辑备注">备注</button><button class="row-action node-share" data-action="copy-node" data-id="${esc(node.id)}" title="复制节点链接">复制</button><button class="row-action node-share" data-action="export-node" data-id="${esc(node.id)}" title="导出节点链接">导出</button>${actions}<button class="row-action danger" data-action="delete-node" data-id="${esc(node.id)}" title="删除节点">×</button></span></td></tr>`;
+      return `<tr><td><div class="device-cell"><span class="device-avatar">◈</span><span class="device-name">${esc(node.name || node.address)}${node.remark ? `<small class="node-remark">备注：${esc(node.remark)}</small>` : ''}<small>${esc(node.address || '')}:${esc(node.port || '')}</small></span></div></td><td><span class="protocol-badge ${esc(node.type || '')}">${esc(node.type || 'unknown')}</span></td><td><span class="latency">${result?.ok ? `${esc(result.latency_ms)} ms` : '—'}</span><small class="test-caption">代理 URL 延迟</small></td><td><span class="status-label ${statusClass}"><i></i>${label}</span><div class="node-test-results">${nodeTestSummary(node)}</div></td><td class="muted">${esc(node.last_test ? timeText(node.last_test) : '—')}</td><td class="align-right"><span class="row-actions"><button class="row-action" data-action="remark-node" data-id="${esc(node.id)}" title="编辑备注">备注</button><button class="row-action node-share" data-action="copy-node" data-id="${esc(node.id)}" title="复制节点链接">复制</button><button class="row-action node-share" data-action="export-node" data-id="${esc(node.id)}" title="导出节点链接">导出</button>${actions}<button class="row-action danger" data-action="delete-node" data-id="${esc(node.id)}" title="删除节点" ${state.deletingNodes.has(String(node.id)) ? 'disabled' : ''}>×</button></span></td></tr>`;
     }).join('');
   }
   function ensureNodeTestControls() {
@@ -346,7 +347,7 @@
     button.innerHTML = '↻ 刷新中…';
     try {
       const payload = state.demo ? state.allDevices : await api('/devices?hidden=all');
-      const all = Array.isArray(payload) ? payload : (payload.devices || []);
+      const all = responseList(payload, 'devices');
       state.allDevices = all;
       state.devices = all.filter(device => !device.hidden);
       renderStatus();
@@ -399,7 +400,7 @@
     let imported = null;
     try {
       const result = state.demo ? { imported: content.split(/\r?\n/).filter(Boolean).length || 3 } : await api('/nodes/import', { method: 'POST', body: { content, url } });
-      imported = result.imported ?? result.nodes?.length ?? 0;
+      imported = result?.imported ?? responseList(result, 'nodes').length;
       closeModal();
       if (!state.demo) {
         if (imported > 0) await api('/settings', { method: 'PUT', body: { enabled: true } });
@@ -508,11 +509,45 @@
       if (el.dataset.action === 'dns') patchDevice(id, { dns: el.value });
     });
     $('#devicesTable')?.addEventListener('click', e => { const el = e.target.closest('[data-action]'); if (!el) return; if (el.dataset.action === 'hide') patchDevice(el.dataset.id, { hidden: !state.allDevices.find(d => String(d.id) === String(el.dataset.id))?.hidden }); if (el.dataset.action === 'block') patchDevice(el.dataset.id, { mode: 'blocked', node_id: '' }); if (el.dataset.action === 'remark-device') editDeviceRemark(el.dataset.id); if (el.dataset.action === 'release-device') releaseDevice(el.dataset.id); });
-    $$('[data-node-filter]').forEach(tab => tab.addEventListener('click', () => { $$('[data-node-filter]').forEach(t => t.classList.toggle('active', t === tab)); state.nodeFilter = tab.dataset.nodeFilter; renderNodes(); })); $('#nodeSearch')?.addEventListener('input', renderNodes); $('#nodesTable')?.addEventListener('click', e => { const el = e.target.closest('[data-action]'); if (!el || el.dataset.testType) return; if (el.dataset.action === 'test-node') testNode(el.dataset.id); if (el.dataset.action === 'remark-node') editNodeRemark(el.dataset.id); if (el.dataset.action === 'copy-node') copyNodeURI(el.dataset.id); if (el.dataset.action === 'export-node') exportNodeURI(el.dataset.id); if (el.dataset.action === 'delete-node' && confirm('确定删除这个节点吗？')) deleteNode(el.dataset.id); }); $('#testAllBtn')?.addEventListener('click', testAllNodes);
+    $$('[data-node-filter]').forEach(tab => tab.addEventListener('click', () => { $$('[data-node-filter]').forEach(t => t.classList.toggle('active', t === tab)); state.nodeFilter = tab.dataset.nodeFilter; renderNodes(); })); $('#nodeSearch')?.addEventListener('input', renderNodes); $('#nodesTable')?.addEventListener('click', e => { const el = e.target.closest('[data-action]'); if (!el || el.dataset.testType) return; if (el.dataset.action === 'test-node') testNode(el.dataset.id); if (el.dataset.action === 'remark-node') editNodeRemark(el.dataset.id); if (el.dataset.action === 'copy-node') copyNodeURI(el.dataset.id); if (el.dataset.action === 'export-node') exportNodeURI(el.dataset.id); if (el.dataset.action === 'delete-node') deleteNode(el.dataset.id); }); $('#testAllBtn')?.addEventListener('click', testAllNodes);
     $$('input[name="defaultDns"]').forEach(radio => radio.addEventListener('change', () => { $$('.dns-option').forEach(option => option.classList.toggle('selected', option.querySelector('input').checked)); $('#customDnsWrap').classList.toggle('hidden', radio.value !== 'custom' || !radio.checked); })); $('#saveDnsBtn')?.addEventListener('click', saveDns); $('#testDnsBtn')?.addEventListener('click', () => { $('#dnsLastTest').textContent = '尚未完成终端检测'; toast('请使用连接本路由器的设备进行 DNS 泄漏检测，配置状态不能替代实际检测。', 'error'); }); $('#saveSettingsBtn')?.addEventListener('click', saveSettings); $('#quickProtect')?.addEventListener('click', async () => { const enabled = !state.settings.enabled; try { if (!state.demo) { await api('/settings', { method: 'PUT', body: { enabled } }); await loadData(true); } else { state.settings.enabled = enabled; renderAll(); } toast(state.settings.enabled ? (state.status.kernel_running === true ? '全局保护已开启，内核运行中' : '全局保护已开启，但内核未运行，请检查配置') : '全局保护已关闭', state.settings.enabled && state.status.kernel_running !== true ? 'error' : 'success'); } catch (error) { toast(`操作或刷新失败：${error.message}`, 'error'); } }); $('#restartCoreBtn')?.addEventListener('click', async () => { try { if (!state.demo) { await api('/apply', { method: 'POST' }); await loadData(true); } toast(state.status.kernel_running === true ? 'sing-box 内核已重载' : '配置已应用，代理内核当前未运行', state.status.kernel_running === true ? 'success' : 'error'); } catch (error) { toast(`重启或刷新失败：${error.message}`, 'error'); } }); $('#openSelfServiceBtn')?.addEventListener('click', () => window.open('/choose', '_blank')); $('#copySelfUrl')?.addEventListener('click', () => navigator.clipboard?.writeText(selfURL()).then(() => toast('自助页地址已复制')));
 
   }
-  async function deleteNode(id) { try { if (!state.demo) await api(`/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }); state.nodes = state.nodes.filter(n => String(n.id) !== String(id)); renderNodes(); renderStatus(); toast('节点已删除'); } catch (error) { toast(`删除失败：${error.message}`, 'error'); } }
+  async function showNodeBindings(id, devices, message) {
+    const node = findNode(id);
+    const lines = devices.map(device => {
+      const identity = [device.remark, device.hostname, device.ip].filter(Boolean).join(' · ') || device.mac || '未命名设备';
+      const status = [device.online === false ? '离线' : device.online === true ? '在线' : '', device.hidden ? '隐藏设备' : ''].filter(Boolean).join('、');
+      return `• ${identity}${status ? `（${status}）` : ''}`;
+    });
+    await showActionDialog({ title: '节点仍被设备绑定', message: `${node ? `“${nodeLabel(node)}”\n` : ''}${message || `该节点仍被 ${devices.length} 台设备绑定，请先解绑设备后再删除。`}${lines.length ? `\n\n${lines.join('\n')}` : ''}\n\n请在设备管理中将这些设备改为直连、禁止网络或其他节点，再删除本节点。`, submitText: '知道了' });
+  }
+  async function deleteNode(id) {
+    const key = String(id);
+    if (state.deletingNodes.has(key)) return;
+    state.deletingNodes.add(key);
+    renderNodes();
+    let deleted = false;
+    try {
+      const devices = state.demo ? state.allDevices : responseList(await api('/devices?hidden=all', { cache: 'no-store' }), 'devices');
+      state.allDevices = devices;
+      state.devices = devices.filter(device => !device.hidden);
+      renderStatus(); renderDevices();
+      const bound = devices.filter(device => String(device.node_id || '') === key);
+      if (bound.length) { await showNodeBindings(id, bound); return; }
+      if (!state.demo) await api(`/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      deleted = true;
+      if (!state.demo) await loadData(true);
+      else { state.nodes = state.nodes.filter(node => String(node.id) !== key); renderAll(); }
+      toast('节点已删除');
+    } catch (error) {
+      if (error.status === 409) await showNodeBindings(id, responseList(error.data, 'bound_devices'), error.message);
+      else toast(`${deleted ? '节点已删除，但刷新页面数据失败' : '删除失败'}：${error.message}`, 'error');
+    } finally {
+      state.deletingNodes.delete(key);
+      renderNodes();
+    }
+  }
   function setupSelfEvents() {
     $$('.self-choice').forEach(choice => choice.addEventListener('click', () => setSelfMode(choice.dataset.selfMode)));
     $('#selfRefreshBtn').addEventListener('click', loadSelf);
