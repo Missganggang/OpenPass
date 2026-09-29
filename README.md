@@ -41,7 +41,7 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.4 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.7 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
@@ -55,6 +55,10 @@ OPENPASS_VERSION=v0.1.4 sh /tmp/openpass-install.sh
 - 设备自助页展示访问设备的信息和绑定情况，允许设备选择可用节点；代理设备未单独指定 DNS 时默认使用 Cloudflare DoH，并通过绑定节点发送。
 
 Ping/TCPing 只验证服务器的 ICMP/TCP 连通性，URL 测试才会验证节点协议和代理访问。部分服务器禁用 ICMP，Ping 超时并不代表节点不可用。
+
+节点服务器的域名使用阿里 DoH 单独解析，让直连无法访问海外 DNS 的网络也能建立代理连接。代理设备的网站 DNS 仍使用设备选择的 DoH，并通过绑定节点发送；节点解析失败时不会回退到明文 DNS。
+
+切换直连/代理后，如果浏览器仍使用旧解析结果，可断开并重新连接 Wi-Fi，或清除系统 DNS 缓存。电脑同时连接其他有线/Wi-Fi 网络时，也可能使用另一张网卡的 DNS；验证此路由器的代理和 DNS 时应只保留对应的网络连接。
 
 当前设备策略按 IPv4 地址执行，建议为绑定代理的设备配置 DHCP 静态租约，避免地址变化后策略失配。启用保护时会阻断 LAN 设备的 IPv6 出口，以防绕过当前 IPv4 策略。
 
@@ -111,7 +115,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.4
+make packages VERSION=0.1.7
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS

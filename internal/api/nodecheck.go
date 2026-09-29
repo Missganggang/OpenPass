@@ -91,7 +91,7 @@ func (s *Server) testNode(w http.ResponseWriter, r *http.Request, id string) err
 		// Resolve via pinned DoH first. A plaintext lookup would be blocked
 		// by OpenPass's DNS leak protection, even when the node is healthy.
 		var ips []net.IP
-		ips, err = resolveProbeHost(ctx, n.Address, settings.DefaultDNS, s.Store.DNS())
+		ips, err = resolveProbeHost(ctx, n.Address, s.Store.DNS())
 		if err == nil && body.Type == "ping" {
 			result["note"] = "Ping 只检测服务器 ICMP；服务器禁 Ping 不代表代理不可用，请以 URL 检测为准。"
 			pingPath, lookupErr := exec.LookPath("ping")
@@ -258,11 +258,16 @@ func redactNodeError(message string, n model.Node) string {
 	return message
 }
 
-func resolveProbeHost(ctx context.Context, host, dnsID string, profiles []model.DNS) ([]net.IP, error) {
+func resolveProbeHost(ctx context.Context, host string, profiles []model.DNS) ([]net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		return []net.IP{ip}, nil
 	}
-	ip, tlsName, path := singbox.DoHEndpoint(dnsID, profiles)
+	// Resolve the node endpoint itself through the reachable bootstrap DoH
+	// resolver.  The selected overseas resolver is used by the proxy after
+	// the node is connected; using it here would make every hostname-based
+	// node fail on networks that block 1.1.1.1/8.8.8.8 before the proxy can
+	// start.
+	ip, tlsName, path := singbox.BootstrapDoHEndpoint(profiles)
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{ServerName: tlsName, MinVersion: tls.VersionTLS12},
 		DialContext: func(c context.Context, network, _ string) (net.Conn, error) {
@@ -285,7 +290,7 @@ func resolveProbeHost(ctx context.Context, host, dnsID string, profiles []model.
 		req.Header.Set("Accept", "application/dns-message")
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("节点域名 DoH 解析失败（%s）: %w", dnsID, err)
+			return nil, fmt.Errorf("节点引导 DoH 解析失败（阿里）: %w", err)
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 65537))
 		resp.Body.Close()

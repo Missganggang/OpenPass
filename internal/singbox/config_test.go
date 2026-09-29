@@ -109,6 +109,6 @@ func TestRouterManagementStaysLocalBeforeDeviceBinding(t *testing.T) {
 		t.Fatal("management exception must precede source proxy binding", local)
 	}
 	if rules[2].(map[string]any)["outbound"] != "node" {
-		t.Fatal("public traffic must still use selected node")
+		t.Fatal("public traffic must still use selected node", rules[2])
 	}
 }

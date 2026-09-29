@@ -16,7 +16,7 @@ import (
 	"openpass/internal/store"
 )
 
-var version = "0.1.4"
+var version = "0.1.7"
 
 func main() {
 	listen := flag.String("listen", ":8787", "HTTP listen address")

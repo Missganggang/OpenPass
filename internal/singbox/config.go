@@ -14,13 +14,20 @@ import (
 // mode. DNS requests are sent through DoH and never use the LAN resolver.
 func Build(st model.State) ([]byte, error) {
 	dns := dnsProfile(st.Settings.DefaultDNS, st.DNS)
+	// The router may be on a network where overseas DoH endpoints (for
+	// example 1.1.1.1:443) are blocked.  A node whose server is a hostname
+	// must still be resolved before its outbound can be used, so keep a
+	// domestic DoH bootstrap resolver that is reachable without a proxy.  It
+	// is used only for node endpoint bootstrap; client DNS continues to follow
+	// the selected profile and, for proxy clients, the selected node detour.
+	bootstrap := bootstrapDNS(st.DNS)
 	defaultRoute := "direct"
 	if st.Settings.DefaultMode == "blocked" || st.Settings.DefaultMode == "block" {
 		defaultRoute = "block"
 	}
 	servers := make([]any, 0, 4)
 	seenDNS := map[string]bool{}
-	for _, server := range []map[string]any{dns, dnsProfile("aliyun", st.DNS), dnsProfile("cloudflare", st.DNS), dnsProfile("google", st.DNS), dnsProfile("tencent", st.DNS)} {
+	for _, server := range []map[string]any{dns, bootstrap, dnsProfile("aliyun", st.DNS), dnsProfile("cloudflare", st.DNS), dnsProfile("google", st.DNS), dnsProfile("tencent", st.DNS)} {
 		tag, _ := server["tag"].(string)
 		if !seenDNS[tag] {
 			servers = append(servers, server)
@@ -92,7 +99,7 @@ func Build(st model.State) ([]byte, error) {
 			map[string]any{"type": "direct", "tag": "dns-local-v6", "listen": "::1", "listen_port": 1054},
 		},
 		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}, map[string]any{"type": "block", "tag": "block"}},
-		"route":     map[string]any{"auto_detect_interface": true, "default_domain_resolver": dns["tag"], "final": defaultRoute, "rules": []any{}},
+		"route":     map[string]any{"auto_detect_interface": true, "default_domain_resolver": bootstrap["tag"], "final": defaultRoute, "rules": []any{}},
 	}
 	if len(dnsRules) > 0 {
 		cfg["dns"].(map[string]any)["rules"] = dnsRules
@@ -187,6 +194,19 @@ func dnsProfile(id string, profiles []model.DNS) map[string]any {
 	return map[string]any{"type": "https", "tag": id, "server": ip, "path": path, "tls": map[string]any{"enabled": true, "server_name": host}}
 }
 
+// bootstrapDNS is intentionally pinned to Aliyun DoH.  Resolving a node's
+// hostname is a bootstrapping operation: the selected proxy cannot carry the
+// query until that hostname has resolved.  Using the configured overseas
+// profile here makes every hostname based node fail on networks that block
+// 1.1.1.1/8.8.8.8, even though the node itself is healthy.  Aliyun is a
+// reachable DoH endpoint on those networks and only receives node endpoint
+// lookups, while client DNS remains on its configured profile.
+func bootstrapDNS(profiles []model.DNS) map[string]any {
+	p := dnsProfile("aliyun", profiles)
+	p["tag"] = "bootstrap"
+	return p
+}
+
 func outbound(n model.Node) map[string]any {
 	t := strings.ToLower(n.Type)
 	o := map[string]any{"tag": n.ID, "server": n.Address, "server_port": n.Port}
@@ -270,8 +290,7 @@ func ProbeConfig(n model.Node, port int, dnsID string, profiles []model.DNS) ([]
 	if o == nil {
 		return nil, fmt.Errorf("unsupported node protocol %q", n.Type)
 	}
-	bootstrap := dnsProfile(dnsID, profiles)
-	bootstrap["tag"] = "bootstrap"
+	bootstrap := bootstrapDNS(profiles)
 	proxyDNS := dnsProfile(dnsID, profiles)
 	proxyDNS["tag"], proxyDNS["detour"] = "proxy-dns", "probe-node"
 	cfg := map[string]any{
@@ -284,10 +303,21 @@ func ProbeConfig(n model.Node, port int, dnsID string, profiles []model.DNS) ([]
 	return json.Marshal(cfg)
 }
 
-// DoHEndpoint returns the pinned IP and certificate name used by sing-box.
-// Node probes use it as well, so bootstrap never falls back to plaintext DNS.
+// DoHEndpoint returns the pinned IP and certificate name for a configured
+// profile. Callers that need to resolve a node endpoint before a proxy exists
+// should use BootstrapDoHEndpoint instead.
 func DoHEndpoint(id string, profiles []model.DNS) (ip, host, path string) {
 	p := dnsProfile(id, profiles)
+	return p["server"].(string), p["tls"].(map[string]any)["server_name"].(string), p["path"].(string)
+}
+
+// BootstrapDoHEndpoint returns the resolver used to resolve node hostnames
+// before a proxy connection exists.  Keep this separate from DoHEndpoint so
+// callers that intentionally need a user-selected resolver can retain that
+// behavior while node checks remain usable on networks that block overseas
+// DNS providers.
+func BootstrapDoHEndpoint(profiles []model.DNS) (ip, host, path string) {
+	p := bootstrapDNS(profiles)
 	return p["server"].(string), p["tls"].(map[string]any)["server_name"].(string), p["path"].(string)
 }
 

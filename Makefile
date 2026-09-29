@@ -1,5 +1,5 @@
 APP := openpassd
-VERSION ?= 0.1.4
+VERSION ?= 0.1.7
 GO ?= go
 CGO_ENABLED ?= 0
 

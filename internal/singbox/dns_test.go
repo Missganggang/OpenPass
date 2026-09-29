@@ -60,7 +60,7 @@ func TestProxyDNSUsesBoundNodeAndSeparateBootstrap(t *testing.T) {
 		}
 	}
 	bootstrapTag := cfg["route"].(map[string]any)["default_domain_resolver"].(string)
-	if bootstrap := servers[bootstrapTag]; bootstrap["detour"] != nil || bootstrap["type"] != "https" {
+	if bootstrap := servers[bootstrapTag]; bootstrap["detour"] != nil || bootstrap["type"] != "https" || bootstrap["server"] != "223.5.5.5" {
 		t.Fatal("node bootstrap must avoid recursion and plaintext", bootstrap)
 	}
 	if dns["independent_cache"] != true {
