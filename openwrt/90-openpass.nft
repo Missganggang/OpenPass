@@ -20,7 +20,10 @@ chain openpass_output {
 	type filter hook output priority filter; policy accept;
 }
 chain openpass_dns_nat {
-	type nat hook prerouting priority dstnat; policy accept;
+	# Run before dnsmasq's optional dns_redirect chain (dstnat - 5),
+	# otherwise dnsmasq rewrites the destination back to port 53 before
+	# OpenPass can send the query to sing-box's DoH listener on 1053.
+	type nat hook prerouting priority dstnat - 10; policy accept;
 }
 chain openpass_dns_output {
 	type nat hook output priority dstnat; policy accept;

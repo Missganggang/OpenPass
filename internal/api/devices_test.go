@@ -78,6 +78,21 @@ func TestNodeRemarkPatchAndExport(t *testing.T) {
 		t.Fatalf("URI export status=%d body=%s", w.Code, w.Body)
 	}
 	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/nodes/node1/export?format=uri", nil))
+	if w.Code != http.StatusOK || w.Header().Get("Content-Disposition") == "" || strings.TrimSpace(w.Body.String()) != "socks5://u:p@127.0.0.1:1080#Test" {
+		t.Fatalf("single URI export status=%d disposition=%q body=%s", w.Code, w.Header().Get("Content-Disposition"), w.Body)
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/nodes/node1/export?format=json", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"node1"`) || !strings.Contains(w.Body.String(), `"password":"p"`) {
+		t.Fatalf("single JSON export status=%d body=%s", w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/nodes/missing/export?format=uri", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("missing single export status=%d body=%s", w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/nodes/export?format=json", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "海外主节点") {
 		t.Fatalf("JSON export status=%d body=%s", w.Code, w.Body)

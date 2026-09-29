@@ -34,7 +34,7 @@ type Server struct {
 }
 
 func New(s *store.Store) *Server {
-	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.2"}
+	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.3"}
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 
@@ -330,6 +330,12 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 		return s.importNodes(w, r)
 	}
 	id := parts[0]
+	if len(parts) > 1 && parts[1] == "export" {
+		if r.Method != http.MethodGet {
+			return methodErr()
+		}
+		return s.exportNode(w, r, id)
+	}
 	if len(parts) > 1 && parts[1] == "test" {
 		if r.Method != http.MethodPost {
 			return methodErr()
@@ -380,6 +386,45 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 		return e
 	}
 	return methodErr()
+}
+
+// exportNode writes a shareable link for one node.  Keeping this as a
+// dedicated endpoint lets the UI copy a single credential without having to
+// download the complete node list first.
+func (s *Server) exportNode(w http.ResponseWriter, r *http.Request, id string) error {
+	var node model.Node
+	found := false
+	for _, candidate := range s.Store.Nodes() {
+		if candidate.ID == id {
+			node = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return &httpError{http.StatusNotFound, "node not found"}
+	}
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "uri"
+	}
+	switch format {
+	case "uri", "text", "txt":
+		uri, err := nodes.URI(node)
+		if err != nil {
+			return fmt.Errorf("export node %q: %w", node.ID, err)
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="openpass-node.txt"`)
+		_, err = io.WriteString(w, uri)
+		return err
+	case "json":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="openpass-node.json"`)
+		return json.NewEncoder(w).Encode(node)
+	default:
+		return &httpError{http.StatusBadRequest, "format must be uri or json"}
+	}
 }
 
 func (s *Server) exportNodes(w http.ResponseWriter, r *http.Request) error {

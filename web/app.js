@@ -176,7 +176,7 @@
       const label = node.testing ? `${testLabels[node.testing]} 检测中` : urlOK === true ? 'URL 通过' : urlOK === false ? 'URL 失败' : '待 URL 测试';
       const statusClass = urlOK === false ? 'bad' : urlOK === true ? '' : 'off';
       const actions = ['ping', 'tcp', 'url'].map(type => `<button class="row-action test-action" data-action="test-node" data-test-type="${type}" data-id="${esc(node.id)}" title="${testLabels[type]} 测试" ${node.testing ? 'disabled' : ''}>${testLabels[type]}</button>`).join('');
-      return `<tr><td><div class="device-cell"><span class="device-avatar">◈</span><span class="device-name">${esc(node.name || node.address)}${node.remark ? `<small class="node-remark">备注：${esc(node.remark)}</small>` : ''}<small>${esc(node.address || '')}:${esc(node.port || '')}</small></span></div></td><td><span class="protocol-badge ${esc(node.type || '')}">${esc(node.type || 'unknown')}</span></td><td><span class="latency">${result?.ok ? `${esc(result.latency_ms)} ms` : '—'}</span><small class="test-caption">代理 URL 延迟</small></td><td><span class="status-label ${statusClass}"><i></i>${label}</span><div class="node-test-results">${nodeTestSummary(node)}</div></td><td class="muted">${esc(node.last_test ? timeText(node.last_test) : '—')}</td><td class="align-right"><span class="row-actions"><button class="row-action" data-action="remark-node" data-id="${esc(node.id)}" title="编辑备注">备注</button>${actions}<button class="row-action danger" data-action="delete-node" data-id="${esc(node.id)}" title="删除节点">×</button></span></td></tr>`;
+      return `<tr><td><div class="device-cell"><span class="device-avatar">◈</span><span class="device-name">${esc(node.name || node.address)}${node.remark ? `<small class="node-remark">备注：${esc(node.remark)}</small>` : ''}<small>${esc(node.address || '')}:${esc(node.port || '')}</small></span></div></td><td><span class="protocol-badge ${esc(node.type || '')}">${esc(node.type || 'unknown')}</span></td><td><span class="latency">${result?.ok ? `${esc(result.latency_ms)} ms` : '—'}</span><small class="test-caption">代理 URL 延迟</small></td><td><span class="status-label ${statusClass}"><i></i>${label}</span><div class="node-test-results">${nodeTestSummary(node)}</div></td><td class="muted">${esc(node.last_test ? timeText(node.last_test) : '—')}</td><td class="align-right"><span class="row-actions"><button class="row-action" data-action="remark-node" data-id="${esc(node.id)}" title="编辑备注">备注</button><button class="row-action node-share" data-action="copy-node" data-id="${esc(node.id)}" title="复制节点链接">复制</button><button class="row-action node-share" data-action="export-node" data-id="${esc(node.id)}" title="导出节点链接">导出</button>${actions}<button class="row-action danger" data-action="delete-node" data-id="${esc(node.id)}" title="删除节点">×</button></span></td></tr>`;
     }).join('');
   }
   function ensureNodeTestControls() {
@@ -211,6 +211,31 @@
   function renderSettings() { const s = state.settings; $('#killSwitch').checked = s.kill_switch !== false; $('#newDevicePolicy').value = s.default_mode || 'direct'; $('#selfServiceEnabled').checked = s.self_service_enabled !== false; $('#hideAp').checked = s.hide_ap !== false; $('#serviceUptime').textContent = state.status.uptime ? `运行 ${state.status.uptime}` : '服务在线'; if ($('#selfServiceUrl')) $('#selfServiceUrl').textContent = selfURL(); if ($('.self-url span')) $('.self-url span').textContent = selfURL(); }
 
   async function patchDevice(id, body) { try { if (!state.demo) await api(`/devices/${encodeURIComponent(id)}`, { method: 'PATCH', body }); const d = state.allDevices.find(x => String(x.id) === String(id)); if (d) Object.assign(d, body); renderStatus(); renderDevices(); toast('设备设置已保存'); } catch (error) { toast(`保存失败：${error.message}`, 'error'); } }
+  async function refreshDevices() {
+    const button = $('#discoverBtn');
+    if (!button || button.disabled) return;
+    const label = button.innerHTML;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.innerHTML = '↻ 刷新中…';
+    try {
+      const payload = state.demo ? state.allDevices : await api('/devices?hidden=all');
+      const all = Array.isArray(payload) ? payload : (payload.devices || []);
+      state.allDevices = all;
+      state.devices = all.filter(device => !device.hidden);
+      renderStatus();
+      renderDashboard();
+      renderDevices();
+      const online = all.filter(device => device.online && !device.hidden).length;
+      toast(`设备已刷新：发现 ${all.length} 台，在线 ${online} 台`);
+    } catch (error) {
+      toast(`刷新设备失败：${error.message}`, 'error');
+    } finally {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      button.innerHTML = label;
+    }
+  }
   async function testNode(id, type = 'url') {
     const node = findNode(id);
     if (!node || node.testing) return;
@@ -247,6 +272,58 @@
     const link = document.createElement('a'); link.href = `${API}/nodes/export?format=${encodeURIComponent(format || 'uri')}`; link.download = format === 'json' ? 'openpass-nodes.json' : 'openpass-nodes.txt'; document.body.appendChild(link); link.click(); link.remove(); toast('节点导出已开始');
   }
 
+  async function fetchNodeURI(id) {
+    if (state.demo) throw new Error('演示模式不提供导出');
+    const response = await fetch(`${API}/nodes/${encodeURIComponent(id)}/export?format=uri`, { credentials: 'include', cache: 'no-store' });
+    const text = await response.text();
+    if (!response.ok) {
+      let message = text.trim() || `HTTP ${response.status}`;
+      try { const data = JSON.parse(text); message = data.error || data.message || message; } catch (_) { /* plain-text error */ }
+      throw new Error(message);
+    }
+    const uri = text.trim();
+    if (!uri) throw new Error('节点没有可导出的链接');
+    return uri;
+  }
+
+  async function copyText(value) {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(value);
+        return true;
+      }
+    } catch (_) { /* HTTP pages may not expose navigator.clipboard. */ }
+    const input = document.createElement('textarea');
+    input.value = value;
+    input.setAttribute('readonly', '');
+    input.style.position = 'fixed'; input.style.opacity = '0'; input.style.pointerEvents = 'none';
+    document.body.appendChild(input); input.select(); input.setSelectionRange(0, input.value.length);
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch (_) { copied = false; }
+    input.remove();
+    return copied;
+  }
+
+  async function copyNodeURI(id) {
+    try {
+      const uri = await fetchNodeURI(id);
+      if (!await copyText(uri)) throw new Error('浏览器禁止访问剪贴板，请手动导出链接');
+      toast('节点链接已复制');
+    } catch (error) { toast(`复制失败：${error.message}`, 'error'); }
+  }
+
+  async function exportNodeURI(id) {
+    try {
+      const uri = await fetchNodeURI(id);
+      const node = findNode(id);
+      const label = (node?.remark || node?.name || node?.address || 'openpass-node').replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || 'openpass-node';
+      const blob = new Blob([`${uri}\n`], { type: 'text/plain;charset=utf-8' });
+      const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${label}.txt`; document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      toast('节点链接导出已开始');
+    } catch (error) { toast(`导出失败：${error.message}`, 'error'); }
+  }
+
   async function editNodeRemark(id) {
     const node = findNode(id); if (!node) return;
     const value = window.prompt('请输入节点备注（留空可清除）', node.remark || '');
@@ -265,12 +342,12 @@
     window.addEventListener('hashchange', () => navigate(location.hash.slice(1) || 'dashboard'));
     $$('.nav-item').forEach(el => el.addEventListener('click', e => { e.preventDefault(); navigate(el.dataset.page); }));
     $$('[data-goto]').forEach(el => el.addEventListener('click', () => navigate(el.dataset.goto)));
-    $('#menuBtn')?.addEventListener('click', () => $('#sidebar').classList.toggle('open')); $('#refreshBtn')?.addEventListener('click', () => loadData()); $('#importNodeBtn')?.addEventListener('click', openModal); $('#exportNodesBtn')?.addEventListener('click', () => exportNodes('uri')); $('#exportNodesJsonBtn')?.addEventListener('click', () => exportNodes('json')); $('#modalClose')?.addEventListener('click', closeModal); $('#modalCancel')?.addEventListener('click', closeModal); $('#modalBackdrop')?.addEventListener('click', e => { if (e.target.id === 'modalBackdrop') closeModal(); }); $('#importSubmit')?.addEventListener('click', importNodes);
+    $('#menuBtn')?.addEventListener('click', () => $('#sidebar').classList.toggle('open')); $('#refreshBtn')?.addEventListener('click', () => loadData()); $('#discoverBtn')?.addEventListener('click', refreshDevices); $('#importNodeBtn')?.addEventListener('click', openModal); $('#exportNodesBtn')?.addEventListener('click', () => exportNodes('uri')); $('#exportNodesJsonBtn')?.addEventListener('click', () => exportNodes('json')); $('#modalClose')?.addEventListener('click', closeModal); $('#modalCancel')?.addEventListener('click', closeModal); $('#modalBackdrop')?.addEventListener('click', e => { if (e.target.id === 'modalBackdrop') closeModal(); }); $('#importSubmit')?.addEventListener('click', importNodes);
     $$('.import-tab').forEach(tab => tab.addEventListener('click', () => { $$('.import-tab').forEach(t => t.classList.toggle('active', t === tab)); $('#importTextPane').classList.toggle('hidden', tab.dataset.importTab !== 'text'); $('#importSubscriptionPane').classList.toggle('hidden', tab.dataset.importTab !== 'subscription'); }));
     $$('[data-device-tab]').forEach(tab => tab.addEventListener('click', () => { $$('[data-device-tab]').forEach(t => t.classList.toggle('active', t === tab)); state.deviceTab = tab.dataset.deviceTab; renderDevices(); })); $('#deviceSearch')?.addEventListener('input', renderDevices); $('#showHiddenBtn')?.addEventListener('click', () => { state.deviceTab = 'hidden'; $$('[data-device-tab]').forEach(t => t.classList.toggle('active', t.dataset.deviceTab === 'hidden')); renderDevices(); });
     $('#devicesTable')?.addEventListener('change', e => { const el = e.target; const id = el.dataset.id; if (!id) return; if (el.dataset.action === 'mode') patchDevice(id, { mode: el.value, node_id: el.value === 'proxy' ? (state.allDevices.find(d => String(d.id) === String(id))?.node_id || null) : null }); if (el.dataset.action === 'node') patchDevice(id, { node_id: el.value, mode: 'proxy' }); if (el.dataset.action === 'dns') patchDevice(id, { dns: el.value }); });
     $('#devicesTable')?.addEventListener('click', e => { const el = e.target.closest('[data-action]'); if (!el) return; if (el.dataset.action === 'hide') patchDevice(el.dataset.id, { hidden: !state.allDevices.find(d => String(d.id) === String(el.dataset.id))?.hidden }); if (el.dataset.action === 'block') patchDevice(el.dataset.id, { mode: 'blocked', node_id: null }); });
-    $$('[data-node-filter]').forEach(tab => tab.addEventListener('click', () => { $$('[data-node-filter]').forEach(t => t.classList.toggle('active', t === tab)); state.nodeFilter = tab.dataset.nodeFilter; renderNodes(); })); $('#nodeSearch')?.addEventListener('input', renderNodes); $('#nodesTable')?.addEventListener('click', e => { const el = e.target.closest('[data-action]'); if (!el || el.dataset.testType) return; if (el.dataset.action === 'test-node') testNode(el.dataset.id); if (el.dataset.action === 'remark-node') editNodeRemark(el.dataset.id); if (el.dataset.action === 'delete-node' && confirm('确定删除这个节点吗？')) deleteNode(el.dataset.id); }); $('#testAllBtn')?.addEventListener('click', testAllNodes);
+    $$('[data-node-filter]').forEach(tab => tab.addEventListener('click', () => { $$('[data-node-filter]').forEach(t => t.classList.toggle('active', t === tab)); state.nodeFilter = tab.dataset.nodeFilter; renderNodes(); })); $('#nodeSearch')?.addEventListener('input', renderNodes); $('#nodesTable')?.addEventListener('click', e => { const el = e.target.closest('[data-action]'); if (!el || el.dataset.testType) return; if (el.dataset.action === 'test-node') testNode(el.dataset.id); if (el.dataset.action === 'remark-node') editNodeRemark(el.dataset.id); if (el.dataset.action === 'copy-node') copyNodeURI(el.dataset.id); if (el.dataset.action === 'export-node') exportNodeURI(el.dataset.id); if (el.dataset.action === 'delete-node' && confirm('确定删除这个节点吗？')) deleteNode(el.dataset.id); }); $('#testAllBtn')?.addEventListener('click', testAllNodes);
     $$('input[name="defaultDns"]').forEach(radio => radio.addEventListener('change', () => { $$('.dns-option').forEach(option => option.classList.toggle('selected', option.querySelector('input').checked)); $('#customDnsWrap').classList.toggle('hidden', radio.value !== 'custom' || !radio.checked); })); $('#saveDnsBtn')?.addEventListener('click', saveDns); $('#testDnsBtn')?.addEventListener('click', () => { $('#dnsLastTest').textContent = '尚未完成终端检测'; toast('请使用连接本路由器的设备进行 DNS 泄漏检测，配置状态不能替代实际检测。', 'error'); }); $('#saveSettingsBtn')?.addEventListener('click', saveSettings); $('#quickProtect')?.addEventListener('click', async () => { state.settings.enabled = !state.settings.enabled; try { if (!state.demo) await api('/settings', { method: 'PUT', body: { enabled: state.settings.enabled } }); renderStatus(); toast(state.settings.enabled ? '全局保护已开启' : '全局保护已关闭'); } catch (error) { state.settings.enabled = !state.settings.enabled; toast(`操作失败：${error.message}`, 'error'); } }); $('#restartCoreBtn')?.addEventListener('click', async () => { try { if (!state.demo) await api('/apply', { method: 'POST' }); toast('sing-box 内核已重载'); } catch (error) { toast(`重启失败：${error.message}`, 'error'); } }); $('#openSelfServiceBtn')?.addEventListener('click', () => window.open('/choose', '_blank')); $('#copySelfUrl')?.addEventListener('click', () => navigator.clipboard?.writeText(selfURL()).then(() => toast('自助页地址已复制')));
 
   }
