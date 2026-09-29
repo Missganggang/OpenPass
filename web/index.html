@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta name="theme-color" content="#0b1220" />
   <title>OpenPass · 软路由代理管理</title>
-  <link rel="stylesheet" href="/styles.css?v=0.1.3" />
+  <link rel="stylesheet" href="/styles.css?v=0.1.4" />
 </head>
 <body>
   <div class="app-shell">
@@ -71,6 +71,6 @@
   <div class="toast-stack" id="toastStack" role="status" aria-live="polite" aria-atomic="false"></div>
 
   <div class="modal-backdrop hidden" id="modalBackdrop"><div class="modal" id="importModal"><button class="modal-close" id="modalClose">×</button><div class="modal-head"><div class="modal-icon">◈</div><div><h2>导入节点</h2><p class="muted">支持分享链接、JSON 或订阅地址</p></div></div><div class="import-tabs"><button class="import-tab active" data-import-tab="text">节点内容</button><button class="import-tab" data-import-tab="subscription">订阅地址</button></div><div id="importTextPane"><label class="field-label">粘贴节点链接或配置<span>每行一个节点，支持 vless://、vmess://、socks5:// 等格式</span></label><textarea class="textarea" id="nodeImportText" rows="6" placeholder="vless://...\nvmess://...\nsocks5://..."></textarea></div><div id="importSubscriptionPane" class="hidden"><label class="field-label">订阅地址<span>保存后会定时同步节点</span></label><input class="input" id="subscriptionUrl" placeholder="https://example.com/subscription" /></div><div class="modal-foot"><button class="btn btn-ghost" id="modalCancel">取消</button><button class="btn btn-primary" id="importSubmit">开始导入</button></div></div></div>
-  <script src="/app.js?v=0.1.3"></script>
+  <script src="/app.js?v=0.1.4"></script>
 </body>
 </html>

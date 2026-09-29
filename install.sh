@@ -21,7 +21,7 @@ if [ "$version" = latest ]; then
 else
 	case "$version" in
 		v[0-9]*) ;;
-		*) fail "OPENPASS_VERSION must be a release tag such as v0.1.3, or latest." ;;
+		*) fail "OPENPASS_VERSION must be a release tag such as v0.1.4, or latest." ;;
 	esac
 	case "$version" in *[!A-Za-z0-9._-]*) fail "Invalid release tag." ;; esac
 	base="$repo/releases/download/$version"

@@ -41,7 +41,7 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.3 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.4 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
@@ -111,7 +111,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.3
+make packages VERSION=0.1.4
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS
