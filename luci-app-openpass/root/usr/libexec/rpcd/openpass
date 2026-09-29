@@ -1,0 +1,75 @@
+#!/bin/sh
+# LuCI service control remains available while the OpenPass daemon is stopped.
+# Only fixed OpenPass commands are exposed; no caller-supplied executable/path.
+umask 077
+. /usr/share/libubox/jshn.sh
+
+INIT=/etc/init.d/openpass
+MARKER=/etc/openpass/service-disabled
+
+fail() {
+	json_init
+	json_add_string error "$1"
+	json_dump
+	exit 0
+}
+
+status() {
+	[ -x "$INIT" ] || fail 'OpenPass 服务未安装，请重新安装或升级。'
+	service=$(ubus call service list '{"name":"openpass"}' 2>/dev/null) || fail '无法读取系统服务状态，请刷新后重试。'
+	running=$(printf '%s' "$service" | jsonfilter -e '@.openpass.instances.openpass.running')
+	json_init
+	if [ "$running" = true ]; then json_add_boolean running 1; else json_add_boolean running 0; fi
+	if "$INIT" enabled >/dev/null 2>&1; then json_add_boolean enabled 1; else json_add_boolean enabled 0; fi
+	if [ -e "$MARKER" ]; then json_add_boolean stopped 1; else json_add_boolean stopped 0; fi
+	if [ -e "$MARKER" ] && [ "$(cat "$MARKER")" != stopped ]; then json_add_boolean cleanup_pending 1; else json_add_boolean cleanup_pending 0; fi
+	json_dump
+}
+
+case "$1" in
+	list)
+		printf '%s\n' '{"status":{},"set_enabled":{"enabled":true}}'
+		;;
+	call)
+		case "$2" in
+			status) status ;;
+			set_enabled)
+				read -r input
+				json_load "$input" || fail '请求格式不正确。'
+				json_get_type kind enabled
+				[ "$kind" = boolean ] || fail 'enabled 必须是布尔值。'
+				json_get_var requested enabled
+				[ -x "$INIT" ] || fail 'OpenPass 服务未安装，请重新安装或升级。'
+				mkdir -p /var/lock /var/run/openpass /etc/openpass || fail '无法创建服务控制目录。'
+				exec 9>/var/lock/openpass-control.lock
+				flock -n 9 || fail 'OpenPass 正在切换状态，请稍后重试。'
+				if [ "$requested" = 1 ]; then
+					rm -f "$MARKER" || fail '无法解除关闭状态。'
+					if ! "$INIT" enable 9>&- >/var/run/openpass/control.log 2>&1 || ! "$INIT" start 9>&- >>/var/run/openpass/control.log 2>&1; then
+						fail '开启失败，请检查系统日志或 /var/run/openpass/control.log。'
+					fi
+					attempt=0
+					until "$INIT" running >/dev/null 2>&1; do
+						attempt=$((attempt + 1))
+						[ "$attempt" -lt 10 ] || fail '服务未能启动，请检查系统日志。'
+						sleep 1
+					done
+				else
+					# Persist intent before stopping, so respawn/reboot cannot undo it.
+					printf '%s\n' pending >"$MARKER" || fail '无法保存关闭状态。'
+					disabled_ok=1
+					"$INIT" disable 9>&- >/var/run/openpass/control.log 2>&1 || disabled_ok=0
+					stopped_ok=1
+					"$INIT" stop 9>&- >>/var/run/openpass/control.log 2>&1 || stopped_ok=0
+					if [ "$disabled_ok" != 1 ] || [ "$stopped_ok" != 1 ] || "$INIT" running >/dev/null 2>&1; then
+						fail '停止或规则清理失败，请重试关闭并检查 /var/run/openpass/control.log。'
+					fi
+					printf '%s\n' stopped >"$MARKER" || fail '服务已停止，但无法保存状态，请重试关闭。'
+				fi
+				status
+				;;
+			*) fail '不支持的服务操作。' ;;
+		esac
+		;;
+	*) exit 1 ;;
+esac

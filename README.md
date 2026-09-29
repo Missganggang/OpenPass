@@ -30,7 +30,9 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 
 - 管理页面：`http://路由器内网地址:8787/`
 - 设备自助页：`http://路由器内网地址:8787/choose`
-- LuCI：**服务 → OpenPass**，两个按钮分别打开以上页面。
+- LuCI：**服务 → OpenPass**，可打开以上页面，也可开启或关闭整个 OpenPass 服务。
+
+LuCI 的 **关闭 OpenPass** 会停止管理后台及它启动的 sing-box，撤销 OpenPass 的 DNS 接管与设备阻断规则，并关闭开机自启；管理页和设备自助页此时均无法访问，可再使用其他代理软件。节点、设备和 DNS 配置保留，路由器重启或升级 OpenPass 后仍保持关闭。需要恢复时，在 LuCI 点击 **开启 OpenPass**，按原配置启动并恢复开机自启。此服务开关独立于管理页中的“全局保护”开关；LuCI 自身仍可访问。
 
 设备自助页应由对应设备直接连接此路由器的局域网后访问；经过上级 NAT、反向代理或访客隔离时，路由器可能无法识别该设备的 MAC。访问地址例如 `http://10.0.0.1:8787/choose`。`openpass.lan` 需要额外配置本地 DNS，安装脚本不会自动建立此域名。
 
@@ -41,7 +43,7 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.9 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.10 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
@@ -119,7 +121,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.9
+make packages VERSION=0.1.10
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS

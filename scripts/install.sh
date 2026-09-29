@@ -50,7 +50,7 @@ else
 	NFT="$ROOT/openwrt/90-openpass.nft"
 	POLICY_INCLUDE="$ROOT/openwrt/92-openpass-policy.nft"
 fi
-for required in "$BINARY" "$WEB/index.html" "$WEB/app.js" "$WEB/styles.css" "$INIT" "$NFT" "$POLICY_INCLUDE" "$ROOT/scripts/firewall-reload.sh" "$ROOT/scripts/firewall-settings.sh" "$ROOT/luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js"; do
+for required in "$BINARY" "$WEB/index.html" "$WEB/app.js" "$WEB/styles.css" "$INIT" "$NFT" "$POLICY_INCLUDE" "$ROOT/scripts/firewall-reload.sh" "$ROOT/scripts/firewall-settings.sh" "$ROOT/luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js" "$ROOT/luci-app-openpass/root/usr/libexec/rpcd/openpass" "$ROOT/luci-app-openpass/root/usr/share/rpcd/acl.d/luci-app-openpass.json"; do
 	[ -f "$required" ] || fail "Required package file is missing: $required"
 done
 
@@ -66,6 +66,7 @@ if [ -z "$DESTDIR" ]; then
 	[ -c /dev/net/tun ] || dependencies="$dependencies kmod-tun"
 	[ -s /etc/ssl/certs/ca-certificates.crt ] || dependencies="$dependencies ca-bundle"
 	[ -f /www/luci-static/resources/luci.js ] || dependencies="$dependencies luci"
+	command -v flock >/dev/null 2>&1 || dependencies="$dependencies flock"
 	if [ -n "$dependencies" ]; then
 		echo "Installing dependencies:$dependencies"
 		if command -v opkg >/dev/null 2>&1; then
@@ -112,10 +113,12 @@ chmod 0644 "$PREFIX/share/nftables.d/ruleset-post/92-openpass-policy.nft"
 # LuCI needs both the root overlay and the htdocs JavaScript view.
 cp -R "$ROOT/luci-app-openpass/root/." "$DESTDIR/"
 cp -R "$ROOT/luci-app-openpass/htdocs/." "$WWW/"
-chmod 0644 "$WWW/luci-static/resources/view/openpass/links.js"
+chmod 0644 "$WWW/luci-static/resources/view/openpass/service.js"
 chmod 0644 "$PREFIX/share/luci/menu.d/luci-app-openpass.json"
+chmod 0644 "$PREFIX/share/rpcd/acl.d/luci-app-openpass.json"
+chmod 0755 "$PREFIX/libexec/rpcd/openpass"
 # Remove only known files from the old Lua implementation.
-rm -f "$PREFIX/lib/lua/luci/controller/openpass.lua" "$PREFIX/lib/lua/luci/model/openpass.lua" "$PREFIX/lib/lua/luci/view/openpass/links.htm" "$PREFIX/share/rpcd/acl.d/luci-app-openpass.json"
+rm -f "$PREFIX/lib/lua/luci/controller/openpass.lua" "$PREFIX/lib/lua/luci/model/openpass.lua" "$PREFIX/lib/lua/luci/view/openpass/service.htm"
 
 if [ ! -f "$ETC/openpass/state.json" ]; then
 	cat >"$ETC/openpass/state.json" <<'JSON'
@@ -126,6 +129,12 @@ chmod 0700 "$ETC/openpass"
 chmod 0600 "$ETC/openpass/state.json"
 
 if [ -z "$DESTDIR" ]; then
+	if [ -e /etc/openpass/service-disabled ]; then
+		/etc/init.d/openpass disable
+		/etc/init.d/openpass stop || fail "Could not preserve the stopped state; inspect logread -e openpass."
+		printf '%s\n' stopped >/etc/openpass/service-disabled
+		echo "OpenPass remains stopped. Enable it from LuCI when needed."
+	else
 	. "$ROOT/scripts/firewall-settings.sh"
 	openpass_configure_fw4_defaults /etc/openpass/offloading-backup || fail "Could not preserve and configure firewall offloading/automatic includes."
 	# Move runtime commands out of the fw4 include directory used by old builds.
@@ -159,7 +168,15 @@ if [ -z "$DESTDIR" ]; then
 	fi
 	/etc/init.d/openpass enable
 	/etc/init.d/openpass restart || fail "OpenPass could not be started. Inspect logread -e openpass."
-	# The two links require no RPC ACL; rpcd sessions can remain connected.
+	fi
+	# Reload ACLs and discover the one-shot service-control plugin.
+	/etc/init.d/rpcd restart || fail "Could not register the LuCI service-control RPC."
+	rpc_attempt=0
+	until ubus -S list openpass 2>/dev/null | grep -qx openpass; do
+		rpc_attempt=$((rpc_attempt + 1))
+		[ "$rpc_attempt" -lt 10 ] || fail "LuCI service-control RPC did not appear. Inspect logread -e rpcd."
+		sleep 1
+	done
 	rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
 	if [ -d /tmp/luci-modulecache ]; then
 		find /tmp/luci-modulecache -type f -exec rm -f {} \;

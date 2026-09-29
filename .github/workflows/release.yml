@@ -34,10 +34,12 @@ jobs:
           go test ./...
           go vet ./...
           node --check web/app.js
-          node --check luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js
-          for script in install.sh scripts/*.sh; do sh -n "$script"; done
+          node --check luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js
+          for script in install.sh scripts/*.sh openwrt/openpass.init luci-app-openpass/root/usr/libexec/rpcd/openpass; do sh -n "$script"; done
           sh scripts/tests/firewall-reload.sh
           sh scripts/tests/firewall-settings.sh
+          sh scripts/tests/service-stop.sh
+          sh scripts/tests/service-control.sh
       - name: Build release archives
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -45,8 +47,8 @@ jobs:
           case "$RELEASE_TAG" in v[0-9]*) ;; *) echo 'Expected a version tag'; exit 1 ;; esac
           make packages VERSION="${RELEASE_TAG#v}"
           sh scripts/tests/package-install.sh dist/openpass-linux-amd64.tar.gz
-          tar -tzf dist/openpass-linux-amd64.tar.gz | grep -Fx 'openpass/luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js'
-          tar -tzf dist/openpass-linux-386.tar.gz | grep -Fx 'openpass/luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js'
+          tar -tzf dist/openpass-linux-amd64.tar.gz | grep -Fx 'openpass/luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js'
+          tar -tzf dist/openpass-linux-386.tar.gz | grep -Fx 'openpass/luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js'
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

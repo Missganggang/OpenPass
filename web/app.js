@@ -200,7 +200,7 @@
 
   function renderAll() { renderStatus(); renderDashboard(); renderDevices(); renderNodes(); renderSettings(); renderDns(); navigate(state.page); }
   function renderStatus() {
-    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.9').replace(/^v/, '')}`;
+    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.10').replace(/^v/, '')}`;
     const online = state.allDevices.filter(d => d.online && !d.hidden).length; const proxied = state.allDevices.filter(d => d.mode === 'proxy' && !d.hidden).length; const healthy = state.nodes.filter(n => nodeURLResult(n) === true && n.enabled !== false).length;
     $('#metricOnline').textContent = online; $('#metricProxied').textContent = proxied; $('#metricNodes').textContent = healthy; $('#onlineBadge').textContent = online; $('#nodesBadge').textContent = state.nodes.length; $('#onlineCount').textContent = online; $('#offlineCount').textContent = state.allDevices.filter(d => !d.online && !d.hidden).length; $('#hiddenCount').textContent = state.allDevices.filter(d => d.hidden).length; $('#hiddenTabCount').textContent = state.allDevices.filter(d => d.hidden).length;
     $('#metricDns').textContent = state.settings.default_dns ? dnsName(state.settings.default_dns) : 'DoH 安全'; $('#metricDnsSub').textContent = state.settings.force_doh === false ? '加密解析未强制' : 'DoH 加密解析'; $('#kernelVersion').textContent = state.status.kernel || state.status.version || 'sing-box 运行中'; $('#routerAddress').textContent = state.status.router || 'OpenWrt · 10.0.0.1';

@@ -15,9 +15,10 @@ for policy in "$work/openpass/etc/nftables.d/90-openpass.nft" "$work/openpass/us
 done
 [ ! -e "$work/openpass/etc/openpass/state.json" ]
 DESTDIR="$work/staged" sh "$work/openpass/install.sh"
-test -f "$work/staged/www/luci-static/resources/view/openpass/links.js"
+test -f "$work/staged/www/luci-static/resources/view/openpass/service.js"
 test -f "$work/staged/usr/share/luci/menu.d/luci-app-openpass.json"
-test ! -e "$work/staged/usr/share/rpcd/acl.d/luci-app-openpass.json"
+test -f "$work/staged/usr/share/rpcd/acl.d/luci-app-openpass.json"
+test -x "$work/staged/usr/libexec/rpcd/openpass"
 include="$work/staged/usr/share/nftables.d/ruleset-post/92-openpass-policy.nft"
 test -r "$include"
 grep -Fx 'include "/etc/openpass/firewall-policy*.nft"' "$include" >/dev/null
@@ -29,6 +30,8 @@ test "$(stat -c %a "$work/staged/etc/openpass/state.json")" = 600
 test "$(stat -c %a "$work/staged/etc/openpass")" = 700
 grep -q '"default_mode":"direct"' "$work/staged/etc/openpass/state.json"
 before=$(sha256sum "$work/staged/etc/openpass/state.json")
+touch "$work/staged/etc/openpass/service-disabled"
 DESTDIR="$work/staged" sh "$work/openpass/install.sh"
 test "$before" = "$(sha256sum "$work/staged/etc/openpass/state.json")"
-echo 'PASS: release install includes LuCI and persistent fw4 policy, protects state permissions, and preserves existing state on upgrade.'
+test -f "$work/staged/etc/openpass/service-disabled"
+echo 'PASS: release install includes LuCI service control and persistent fw4 policy, protects permissions, and preserves configuration and disabled state on upgrade.'

@@ -2,9 +2,10 @@
   "admin/services/openpass": {
     "title": "OpenPass",
     "order": 60,
+    "depends": { "acl": ["luci-app-openpass"] },
     "action": {
       "type": "view",
-      "path": "openpass/links"
+      "path": "openpass/service"
     }
   }
 }

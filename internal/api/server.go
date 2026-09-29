@@ -37,7 +37,7 @@ type Server struct {
 }
 
 func New(s *store.Store) *Server {
-	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.9"}
+	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.10"}
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 

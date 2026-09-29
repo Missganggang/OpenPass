@@ -2,7 +2,7 @@
 # Build a static, self-contained OpenWrt release archive.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${VERSION:-0.1.9}
+VERSION=${VERSION:-0.1.10}
 ARCH=${ARCH:-amd64}
 GO=${GO:-go}
 OUT_DIR=${OUT_DIR:-$ROOT/dist}
@@ -28,7 +28,7 @@ cp "$ROOT/openwrt/openpass.init" "$PKGROOT/etc/init.d/openpass"
 cp "$ROOT/openwrt/90-openpass.nft" "$PKGROOT/etc/nftables.d/90-openpass.nft"
 cp "$ROOT/openwrt/92-openpass-policy.nft" "$PKGROOT/usr/share/nftables.d/ruleset-post/92-openpass-policy.nft"
 cp -R "$ROOT/luci-app-openpass/." "$PKGROOT/luci-app-openpass/"
-[ -f "$PKGROOT/luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js" ] || { echo "LuCI JavaScript view is missing" >&2; exit 1; }
+[ -f "$PKGROOT/luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js" ] || { echo "LuCI JavaScript view is missing" >&2; exit 1; }
 cp "$ROOT/scripts/install.sh" "$ROOT/scripts/firewall-reload.sh" "$ROOT/scripts/firewall-settings.sh" "$ROOT/scripts/backup.sh" "$ROOT/scripts/restore.sh" "$PKGROOT/scripts/"
 cat >"$PKGROOT/install.sh" <<'SH'
 #!/bin/sh
@@ -41,6 +41,7 @@ cp "$ROOT/README.md" "$PKGROOT/README.md"
 find "$PKGROOT" -type d -exec chmod 0755 {} \;
 find "$PKGROOT" -type f -exec chmod 0644 {} \;
 chmod 0755 "$PKGROOT/usr/bin/openpassd" "$PKGROOT/etc/init.d/openpass" "$PKGROOT/install.sh" "$PKGROOT/scripts/"*.sh
+chmod 0755 "$PKGROOT/luci-app-openpass/root/usr/libexec/rpcd/openpass"
 OUT="$OUT_DIR/openpass-linux-$ARCH.tar.gz"
 tar -czf "$OUT" -C "$work" openpass
 echo "Created $OUT"

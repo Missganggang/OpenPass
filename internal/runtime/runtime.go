@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,10 +27,12 @@ type Runtime struct {
 	ConfigPath      string
 	NFTPath         string
 	FallbackNFTPath string
+	DisabledPath    string
 
-	mu   sync.Mutex
-	cmd  *exec.Cmd
-	done chan struct{}
+	closing atomic.Bool
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	done    chan struct{}
 }
 
 type coreStartupLog struct {
@@ -60,7 +63,7 @@ func New(singBoxPath, configPath string) *Runtime {
 	if configPath == "" {
 		configPath = "/var/run/openpass/sing-box.json"
 	}
-	return &Runtime{SingBoxPath: singBoxPath, ConfigPath: configPath, NFTPath: "/var/run/openpass/91-openpass-dynamic.nft", FallbackNFTPath: "/etc/openpass/firewall-policy.nft"}
+	return &Runtime{SingBoxPath: singBoxPath, ConfigPath: configPath, NFTPath: "/var/run/openpass/91-openpass-dynamic.nft", FallbackNFTPath: "/etc/openpass/firewall-policy.nft", DisabledPath: "/etc/openpass/service-disabled"}
 }
 
 // Apply writes the configuration atomically, validates it when sing-box is
@@ -69,6 +72,9 @@ func New(singBoxPath, configPath string) *Runtime {
 func (rt *Runtime) Apply(st model.State) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.closing.Load() || rt.Disabled() {
+		return fmt.Errorf("OpenPass service is stopped")
+	}
 	b, err := singbox.Build(st)
 	if err != nil {
 		return err
@@ -101,7 +107,12 @@ func (rt *Runtime) Apply(st model.State) error {
 	if err := rt.writeFirewall(transition); err != nil {
 		return err
 	}
-	rt.stopLocked()
+	if err := rt.stopLocked(); err != nil {
+		return err
+	}
+	if rt.closing.Load() || rt.Disabled() {
+		return fmt.Errorf("OpenPass service is stopped")
+	}
 	if !st.Settings.Enabled {
 		return nil
 	}
@@ -137,6 +148,10 @@ func (rt *Runtime) Apply(st model.State) error {
 		_ = rt.writeFirewall(transition)
 		return fmt.Errorf("sing-box startup timed out; proxy clients remain blocked")
 	case <-startupLog.ready:
+		if rt.closing.Load() || rt.Disabled() {
+			rt.stopLocked()
+			return fmt.Errorf("OpenPass service is stopped")
+		}
 		if err := rt.writeFirewall(st); err != nil {
 			rt.stopLocked()
 			return err
@@ -149,6 +164,29 @@ func (rt *Runtime) Stop() {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.stopLocked()
+}
+
+// Shutdown permanently rejects new Apply calls in this daemon. Only an
+// explicit service disable releases protection; a restart/crash remains closed.
+func (rt *Runtime) Shutdown() error {
+	rt.closing.Store(true)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if err := rt.stopLocked(); err != nil {
+		return err
+	}
+	if rt.Disabled() {
+		return rt.clearFirewall()
+	}
+	return nil
+}
+
+func (rt *Runtime) Disabled() bool {
+	if rt.DisabledPath == "" {
+		return false
+	}
+	_, err := os.Stat(rt.DisabledPath)
+	return err == nil || !os.IsNotExist(err)
 }
 
 func (rt *Runtime) Running() bool {
@@ -165,7 +203,7 @@ func (rt *Runtime) Running() bool {
 	}
 }
 
-func (rt *Runtime) stopLocked() {
+func (rt *Runtime) stopLocked() error {
 	if rt.cmd != nil && rt.cmd.Process != nil {
 		// sing-box must handle SIGTERM to remove its TUN policy routes and
 		// auto_redirect rules. SIGKILL leaves rules that can lock out clients.
@@ -174,6 +212,9 @@ func (rt *Runtime) stopLocked() {
 			select {
 			case <-rt.done:
 			case <-time.After(5 * time.Second):
+				if rt.Disabled() {
+					return fmt.Errorf("OpenPass sing-box is still stopping; post-stop cleanup will retry")
+				}
 				_ = rt.cmd.Process.Kill()
 				<-rt.done
 			}
@@ -181,6 +222,7 @@ func (rt *Runtime) stopLocked() {
 	}
 	rt.cmd = nil
 	rt.done = nil
+	return nil
 }
 
 func (rt *Runtime) monitor(cmd *exec.Cmd, st model.State, done chan struct{}) {
@@ -192,7 +234,11 @@ func (rt *Runtime) monitor(cmd *exec.Cmd, st model.State, done chan struct{}) {
 		return
 	}
 	rt.cmd = nil
-	if !st.Settings.Enabled {
+	if rt.Disabled() {
+		_ = rt.clearFirewall()
+		return
+	}
+	if rt.closing.Load() || !st.Settings.Enabled {
 		return
 	}
 	// A dead kernel must never turn a proxy device into a direct device. Keep
@@ -208,6 +254,11 @@ func (rt *Runtime) monitor(cmd *exec.Cmd, st model.State, done chan struct{}) {
 }
 
 func (rt *Runtime) writeFirewall(st model.State) error {
+	// A concurrent HTTP request or child exit must never restore rules after
+	// LuCI has persisted the explicit service-disable marker.
+	if rt.Disabled() {
+		return rt.clearFirewall()
+	}
 	if rt.NFTPath == "" {
 		return nil
 	}

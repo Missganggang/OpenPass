@@ -1,14 +1,14 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-openpass
-PKG_VERSION:=0.1.9
+PKG_VERSION:=0.1.10
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=OpenPass contributors
 
 LUCI_TITLE:=LuCI support for OpenPass
 LUCI_PKGARCH:=all
-LUCI_DEPENDS:=+luci-base
+LUCI_DEPENDS:=+luci-base +rpcd +flock
 
 include $(TOPDIR)/feeds/luci/luci.mk
 
