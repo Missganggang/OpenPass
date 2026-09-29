@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test ./...
+      - run: go vet ./...
+      - run: node --check web/app.js
+      - run: node --check luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js
+      - name: Check shell scripts
+        run: for script in install.sh scripts/*.sh; do sh -n "$script"; done
+      - run: sh scripts/tests/firewall-reload.sh
+      - run: sh scripts/tests/firewall-settings.sh
+      - run: make packages
+      - run: sh scripts/tests/package-install.sh dist/openpass-linux-amd64.tar.gz

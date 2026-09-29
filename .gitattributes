@@ -1,0 +1,9 @@
+* text=auto eol=lf
+*.nft text eol=lf
+*.sh text eol=lf
+*.go text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+Makefile text eol=lf
+openwrt/openpass.init text eol=lf

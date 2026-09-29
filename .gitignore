@@ -1,0 +1,9 @@
+/dist/
+/openpassd
+/openpassd.exe
+/state.json
+/sing-box.json
+/.tmp*
+*.log
+*.tar.gz
+__pycache__/

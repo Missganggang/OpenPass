@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (for example v0.1.1)'
+        required: true
+        default: 'v0.1.1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Validate
+        run: |
+          go test ./...
+          go vet ./...
+          node --check web/app.js
+          node --check luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js
+          for script in install.sh scripts/*.sh; do sh -n "$script"; done
+          sh scripts/tests/firewall-reload.sh
+          sh scripts/tests/firewall-settings.sh
+      - name: Build release archives
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in v[0-9]*) ;; *) echo 'Expected a version tag'; exit 1 ;; esac
+          make packages VERSION="${RELEASE_TAG#v}"
+          sh scripts/tests/package-install.sh dist/openpass-linux-amd64.tar.gz
+          tar -tzf dist/openpass-linux-amd64.tar.gz | grep -Fx 'openpass/luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js'
+          tar -tzf dist/openpass-linux-386.tar.gz | grep -Fx 'openpass/luci-app-openpass/htdocs/luci-static/resources/view/openpass/links.js'
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/openpass-linux-amd64.tar.gz dist/openpass-linux-386.tar.gz dist/SHA256SUMS --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/openpass-linux-amd64.tar.gz dist/openpass-linux-386.tar.gz dist/SHA256SUMS --title "OpenPass $RELEASE_TAG" --generate-notes --latest
+          fi

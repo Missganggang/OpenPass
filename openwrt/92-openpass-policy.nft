@@ -1,0 +1,5 @@
+# Applied after the fw4 table in the same nft transaction. The persistent
+# policy blocks proxy clients until the running daemon writes a live policy.
+# Globs intentionally allow first installation and an empty /var/run at boot.
+include "/etc/openpass/firewall-policy*.nft"
+include "/var/run/openpass/91-openpass-*.nft"
