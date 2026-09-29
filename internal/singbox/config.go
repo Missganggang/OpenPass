@@ -27,7 +27,7 @@ func Build(st model.State) ([]byte, error) {
 	}
 	servers := make([]any, 0, 4)
 	seenDNS := map[string]bool{}
-	for _, server := range []map[string]any{dns, bootstrap, dnsProfile("aliyun", st.DNS), dnsProfile("cloudflare", st.DNS), dnsProfile("google", st.DNS), dnsProfile("tencent", st.DNS)} {
+	for _, server := range []map[string]any{dns, bootstrap, dnsProfile("aliyun", st.DNS), dnsProfile("aliyun-secondary", st.DNS), dnsProfile("cloudflare", st.DNS), dnsProfile("google", st.DNS), dnsProfile("tencent", st.DNS)} {
 		tag, _ := server["tag"].(string)
 		if !seenDNS[tag] {
 			servers = append(servers, server)
@@ -52,10 +52,10 @@ func Build(st model.State) ([]byte, error) {
 			// choose a DNS profile. Keep that traffic on an overseas resolver
 			// by default; an administrator can still explicitly select Aliyun
 			// or another profile for a device in the management page.
-			if d.Mode == "proxy" && st.Settings.ProxyDNS {
+			if d.Mode == "proxy" {
 				profile = "cloudflare"
 			} else {
-				profile = st.Settings.DefaultDNS
+				profile = "aliyun"
 			}
 		}
 		server := dnsProfile(profile, st.DNS)
@@ -172,10 +172,12 @@ func dnsProfile(id string, profiles []model.DNS) map[string]any {
 	switch id {
 	case "aliyun":
 		host, ip = "dns.alidns.com", "223.5.5.5"
+	case "aliyun-secondary":
+		host, ip = "dns.alidns.com", "223.6.6.6"
 	case "google":
 		host, ip = "dns.google", "8.8.8.8"
 	case "tencent":
-		host, ip = "doh.pub", "119.29.29.29"
+		host, ip = "doh.pub", "120.53.53.53"
 	default:
 		id = "cloudflare"
 	}

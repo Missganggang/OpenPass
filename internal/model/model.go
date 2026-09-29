@@ -8,6 +8,7 @@ type Device struct {
 	IP        string    `json:"ip"`
 	MAC       string    `json:"mac"`
 	Hostname  string    `json:"hostname,omitempty"`
+	Remark    string    `json:"remark,omitempty"`
 	Online    bool      `json:"online"`
 	Hidden    bool      `json:"hidden"`
 	Mode      string    `json:"mode"` // proxy, direct, blocked
@@ -82,13 +83,14 @@ type State struct {
 
 func DefaultDNS() []DNS {
 	return []DNS{
-		{ID: "cloudflare", Name: "Cloudflare DoH", URL: "https://cloudflare-dns.com/dns-query", Host: "cloudflare-dns.com"},
-		{ID: "google", Name: "Google DoH", URL: "https://dns.google/dns-query", Host: "dns.google"},
-		{ID: "aliyun", Name: "阿里 DoH", URL: "https://dns.alidns.com/dns-query", Host: "dns.alidns.com"},
-		{ID: "tencent", Name: "腾讯 DoH", URL: "https://doh.pub/dns-query", Host: "doh.pub"},
+		{ID: "cloudflare", Name: "Cloudflare DoH · 1.1.1.1", URL: "https://cloudflare-dns.com/dns-query", Host: "cloudflare-dns.com"},
+		{ID: "google", Name: "Google DoH · 8.8.8.8", URL: "https://dns.google/dns-query", Host: "dns.google"},
+		{ID: "aliyun", Name: "阿里 DoH · 223.5.5.5", URL: "https://dns.alidns.com/dns-query", Host: "dns.alidns.com"},
+		{ID: "aliyun-secondary", Name: "阿里 DoH · 223.6.6.6", URL: "https://dns.alidns.com/dns-query", Host: "dns.alidns.com"},
+		{ID: "tencent", Name: "腾讯 DoH · 120.53.53.53", URL: "https://doh.pub/dns-query", Host: "doh.pub"},
 	}
 }
 
 func DefaultSettings() Settings {
-	return Settings{Enabled: false, KillSwitch: true, DefaultMode: "direct", DefaultDNS: "cloudflare", URLTestAddress: "https://www.gstatic.com/generate_204", URLTestRegion: "overseas", WebPort: 8787, AutoApply: true, SelfServiceEnabled: true, HideAP: true, ForceDoH: true, ProxyDNS: true, DNSFailClosed: true}
+	return Settings{Enabled: false, KillSwitch: true, DefaultMode: "direct", DefaultDNS: "aliyun", URLTestAddress: "https://www.gstatic.com/generate_204", URLTestRegion: "overseas", WebPort: 8787, AutoApply: true, SelfServiceEnabled: true, HideAP: true, ForceDoH: true, ProxyDNS: true, DNSFailClosed: true}
 }

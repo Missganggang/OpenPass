@@ -91,6 +91,58 @@ func TestUnspecifiedProxyDNSDefaultsOverseas(t *testing.T) {
 	}
 }
 
+func TestDeviceDNSDefaultsStaySeparateFromRouterDefault(t *testing.T) {
+	st := model.State{Settings: model.DefaultSettings(), DNS: model.DefaultDNS(), Nodes: []model.Node{{ID: "node", Type: "socks5", Address: "node.example", Port: 1080, Enabled: true}}, Devices: []model.Device{
+		{IP: "10.0.0.30", Mode: "direct"},
+		{IP: "10.0.0.31", Mode: "proxy", NodeID: "node"},
+		{IP: "10.0.0.32", Mode: "direct", DNS: "tencent"},
+		{IP: "10.0.0.33", Mode: "proxy", NodeID: "node", DNS: "aliyun-secondary"},
+	}}
+	st.Settings.DefaultDNS = "google"
+	b, err := Build(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	dns := cfg["dns"].(map[string]any)
+	servers := make(map[string]map[string]any)
+	for _, raw := range dns["servers"].([]any) {
+		server := raw.(map[string]any)
+		servers[server["tag"].(string)] = server
+		if server["type"] != "https" || server["tls"].(map[string]any)["enabled"] != true {
+			t.Fatal("DNS presets must not downgrade to plaintext", server)
+		}
+	}
+	for i, want := range []struct {
+		server string
+		detour any
+	}{
+		{server: "223.5.5.5"},
+		{server: "1.1.1.1", detour: "node"},
+		{server: "120.53.53.53"},
+		{server: "223.6.6.6", detour: "node"},
+	} {
+		rule := dns["rules"].([]any)[i+1].(map[string]any)
+		server := servers[rule["server"].(string)]
+		if server["server"] != want.server || server["detour"] != want.detour {
+			t.Fatalf("device %d DNS policy = %+v, want %+v", i, server, want)
+		}
+	}
+	secondary := servers["aliyun-secondary"]
+	if secondary["server"] != "223.6.6.6" || secondary["tls"].(map[string]any)["server_name"] != "dns.alidns.com" {
+		t.Fatal("Aliyun secondary must use its own IP with verified DoH hostname", secondary)
+	}
+	if bootstrap := servers["bootstrap"]; bootstrap["server"] != "223.5.5.5" || bootstrap["detour"] != nil {
+		t.Fatal("node endpoint bootstrap must stay on primary Aliyun DoH", bootstrap)
+	}
+	if dns["final"] != "google" {
+		t.Fatal("device defaults changed the router's configured DNS")
+	}
+}
+
 func TestRouterDNSHasIPv4AndIPv6LoopbackListeners(t *testing.T) {
 	b, err := Build(model.State{Settings: model.DefaultSettings()})
 	if err != nil {

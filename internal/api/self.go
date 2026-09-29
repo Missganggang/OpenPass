@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -48,64 +49,29 @@ func (s *Server) self(w http.ResponseWriter, r *http.Request) {
 			statusErr(w, &httpError{http.StatusConflict, "尚未识别当前设备的 MAC，请连接本路由器局域网并刷新页面"})
 			return
 		}
-		var body struct {
-			Mode   string `json:"mode"`
-			NodeID string `json:"node_id"`
-			DNS    string `json:"dns"`
-		}
+		var body map[string]json.RawMessage
 		if err := decode(r, &body); err != nil {
 			statusErr(w, err)
 			return
 		}
-		if body.Mode != "direct" && body.Mode != "proxy" {
-			statusErr(w, fmt.Errorf("请选择直连或代理节点"))
-			return
-		}
-		if body.Mode == "proxy" {
-			valid := false
-			for _, n := range s.Store.Nodes() {
-				if n.ID == body.NodeID && n.Enabled {
-					valid = true
-					break
-				}
-			}
-			if !valid {
-				statusErr(w, fmt.Errorf("请选择一个存在且已启用的节点"))
-				return
-			}
-		} else {
-			body.NodeID = ""
-		}
-		if body.DNS != "" {
-			valid := false
-			for _, dns := range s.Store.DNS() {
-				if dns.ID == body.DNS {
-					valid = true
-					break
-				}
-			}
-			if !valid {
-				statusErr(w, fmt.Errorf("请选择有效的 DNS"))
-				return
-			}
-		}
-		updated, err := s.Store.UpdateDevice(d.ID, func(v *model.Device) {
-			v.Mode, v.NodeID = body.Mode, body.NodeID
-			if body.DNS != "" {
-				v.DNS = body.DNS
-			}
-		})
+		req, err := parseDevicePolicyBody(body)
 		if err != nil {
 			statusErr(w, err)
 			return
 		}
-		if s.Runtime != nil && settings.AutoApply {
-			if err := s.Runtime.Apply(s.Store.State()); err != nil {
-				statusErr(w, fmt.Errorf("选择已保存，但应用失败：%w", err))
-				return
-			}
+		if req.mode != "direct" && req.mode != "proxy" {
+			statusErr(w, fmt.Errorf("请选择直连或代理节点"))
+			return
+		}
+		s.discoverMu.Lock()
+		updated, err := s.updateDevicePolicy(d.ID, req, nil)
+		s.discoverMu.Unlock()
+		if err != nil {
+			statusErr(w, err)
+			return
 		}
 		d = updated
+		settings = s.Store.Settings()
 	}
 	nodes := make([]model.Node, 0)
 	for _, n := range s.Store.Nodes() {
@@ -115,6 +81,11 @@ func (s *Server) self(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := selfPayload(d, nodes)
 	payload["enabled"] = settings.Enabled
+	kernelRunning := false
+	if rt, ok := s.Runtime.(interface{ Running() bool }); ok {
+		kernelRunning = rt.Running()
+	}
+	payload["kernel_running"] = kernelRunning
 	payload["self_service_enabled"] = settings.SelfServiceEnabled
 	payload["device_identified"] = identified
 	payload["can_bind"] = identified

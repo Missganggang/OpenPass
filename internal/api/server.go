@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"openpass/internal/model"
 	"openpass/internal/nodes"
@@ -25,16 +27,17 @@ import (
 )
 
 type Server struct {
-	Store       *store.Store
-	ConfigPath  string
-	SingBoxPath string
-	Version     string
-	Runtime     interface{ Apply(model.State) error }
-	discoverMu  sync.Mutex
+	Store               *store.Store
+	ConfigPath          string
+	SingBoxPath         string
+	Version             string
+	Runtime             interface{ Apply(model.State) error }
+	discoverMu          sync.Mutex
+	discoveryNeedsApply bool // protected by discoverMu
 }
 
 func New(s *store.Store) *Server {
-	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.7"}
+	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.8"}
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 
@@ -120,6 +123,8 @@ func statusErr(w http.ResponseWriter, e error) {
 	var he *httpError
 	if errors.As(e, &he) {
 		code = he.code
+	} else if errors.Is(e, os.ErrNotExist) {
+		code = http.StatusNotFound
 	}
 	http.Error(w, e.Error(), code)
 }
@@ -142,6 +147,164 @@ func decode(r *http.Request, v any) error {
 		return nil
 	}
 	return json.Unmarshal(b, v)
+}
+
+// devicePolicyRequest tracks presence separately from value. This matters for
+// PATCH: editing a label or visibility must not reset a device's DNS or
+// binding, while an explicit null node_id is a request to clear a binding.
+type devicePolicyRequest struct {
+	mode, nodeID, dns        string
+	modeSet, nodeSet, dnsSet bool
+}
+
+func parseDevicePolicyBody(body map[string]json.RawMessage) (devicePolicyRequest, error) {
+	var req devicePolicyRequest
+	if raw, ok := body["mode"]; ok {
+		req.modeSet = true
+		if string(raw) != "null" {
+			if err := json.Unmarshal(raw, &req.mode); err != nil {
+				return req, err
+			}
+		}
+	}
+	if raw, ok := body["node_id"]; ok {
+		req.nodeSet = true
+		if string(raw) != "null" {
+			if err := json.Unmarshal(raw, &req.nodeID); err != nil {
+				return req, err
+			}
+		}
+	}
+	if raw, ok := body["dns"]; ok {
+		req.dnsSet = true
+		if string(raw) != "null" {
+			if err := json.Unmarshal(raw, &req.dns); err != nil {
+				return req, err
+			}
+		}
+	}
+	return req, nil
+}
+
+func (s *Server) validateNode(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return &httpError{http.StatusBadRequest, "代理模式必须选择一个节点"}
+	}
+	for _, n := range s.Store.Nodes() {
+		if n.ID == id {
+			if !n.Enabled {
+				return &httpError{http.StatusBadRequest, "所选节点已停用"}
+			}
+			return nil
+		}
+	}
+	return &httpError{http.StatusBadRequest, "所选节点不存在"}
+}
+
+func (s *Server) validateDNS(id string) error {
+	if id == "" {
+		return nil
+	}
+	if id == "custom" && strings.TrimSpace(s.Store.Settings().CustomDNS) != "" {
+		return nil
+	}
+	for _, d := range s.Store.DNS() {
+		if d.ID == id {
+			return nil
+		}
+	}
+	return &httpError{http.StatusBadRequest, "请选择有效的 DNS"}
+}
+
+// updateDevicePolicy applies a binding mutation and immediately reloads the
+// runtime. Runtime reload is intentionally independent of AutoApply: a user
+// explicitly choosing a device policy expects it to take effect at once.
+func (s *Server) updateDevicePolicy(id string, req devicePolicyRequest, edit func(*model.Device) error) (model.Device, error) {
+	var current model.Device
+	found := false
+	for _, d := range s.Store.Devices() {
+		if d.ID == id {
+			current, found = d, true
+			break
+		}
+	}
+	if !found {
+		return model.Device{}, os.ErrNotExist
+	}
+	if edit != nil {
+		if err := edit(&current); err != nil {
+			return model.Device{}, err
+		}
+	}
+	policyChanged := req.modeSet || req.nodeSet || req.dnsSet
+	if !policyChanged {
+		return s.Store.UpsertDevice(current)
+	}
+	return s.saveDevicePolicy(current, req)
+}
+
+func (s *Server) saveDevicePolicy(current model.Device, req devicePolicyRequest) (model.Device, error) {
+	mode, nodeID, dns := current.Mode, current.NodeID, current.DNS
+	if req.modeSet {
+		mode = normalizeMode(strings.TrimSpace(req.mode))
+		if mode != "proxy" && mode != "direct" && mode != "blocked" {
+			return model.Device{}, &httpError{http.StatusBadRequest, "mode 必须是 proxy、direct 或 blocked"}
+		}
+	}
+	if req.nodeSet {
+		nodeID = strings.TrimSpace(req.nodeID)
+		// Selecting a node is itself an explicit request for proxy mode. A
+		// null/empty node with mode=proxy is rejected below instead of silently
+		// producing a non-working policy.
+		if nodeID != "" && !req.modeSet {
+			mode = "proxy"
+		}
+	}
+	if mode == "proxy" {
+		if err := s.validateNode(nodeID); err != nil {
+			return model.Device{}, err
+		}
+	} else {
+		nodeID = ""
+	}
+	if req.dnsSet {
+		dns = strings.TrimSpace(req.dns)
+		if err := s.validateDNS(dns); err != nil {
+			return model.Device{}, err
+		}
+	} else if req.modeSet || req.nodeSet {
+		if mode == "direct" || mode == "blocked" {
+			dns = "aliyun"
+		} else if current.Mode != "proxy" {
+			dns = "cloudflare"
+		}
+	}
+	current.Mode, current.NodeID, current.DNS = mode, nodeID, dns
+	updated, err := s.Store.UpsertDevicePolicy(current, mode == "proxy" && (req.modeSet || req.nodeSet))
+	if err != nil {
+		return model.Device{}, err
+	}
+	if s.Runtime != nil {
+		if err := s.Runtime.Apply(s.Store.State()); err != nil {
+			return model.Device{}, &httpError{http.StatusInternalServerError, fmt.Sprintf("选择已保存，但应用失败：%v", err)}
+		}
+	}
+	return updated, nil
+}
+
+func updateDeviceMetadata(body map[string]json.RawMessage, d *model.Device) error {
+	for key, target := range map[string]any{"hidden": &d.Hidden, "online": &d.Online, "remark": &d.Remark} {
+		if raw, ok := body[key]; ok {
+			if err := json.Unmarshal(raw, target); err != nil {
+				return err
+			}
+		}
+	}
+	d.Remark = strings.TrimSpace(d.Remark)
+	if utf8.RuneCountInString(d.Remark) > 200 {
+		return &httpError{http.StatusBadRequest, "设备备注最多 200 个字符"}
+	}
+	return nil
 }
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
@@ -183,16 +346,25 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request, parts []string)
 			return nil
 		}
 		if r.Method == http.MethodPost {
+			s.discoverMu.Lock()
+			defer s.discoverMu.Unlock()
 			var d model.Device
 			if e := decode(r, &d); e != nil {
 				return e
 			}
-			_, e := s.Store.UpsertDevice(d)
-			if e == nil {
-				if s.Runtime != nil && s.Store.Settings().AutoApply {
-					e = s.Runtime.Apply(s.Store.State())
+			if e := updateDeviceMetadata(nil, &d); e != nil {
+				return e
+			}
+			mode := d.Mode
+			if mode == "" {
+				if d.NodeID != "" {
+					mode = "proxy"
+				} else {
+					mode = s.Store.Settings().DefaultMode
 				}
 			}
+			d.Mode = ""
+			d, e := s.saveDevicePolicy(d, devicePolicyRequest{mode: mode, modeSet: true, nodeID: d.NodeID, nodeSet: true, dns: d.DNS, dnsSet: d.DNS != ""})
 			if e == nil {
 				writeJSON(w, d)
 			}
@@ -216,69 +388,52 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request, parts []string)
 		if r.Method != http.MethodPost {
 			return methodErr()
 		}
-		var body struct {
-			NodeID string `json:"node_id"`
-			Mode   string `json:"mode"`
-			DNS    string `json:"dns"`
-		}
+		s.discoverMu.Lock()
+		defer s.discoverMu.Unlock()
+		var body map[string]json.RawMessage
 		if e := decode(r, &body); e != nil {
 			return e
 		}
-		d, e := s.Store.UpdateDevice(id, func(d *model.Device) {
-			d.NodeID = body.NodeID
-			if body.Mode != "" {
-				d.Mode = normalizeMode(body.Mode)
-			} else if body.NodeID != "" {
-				d.Mode = "proxy"
-			}
-			if body.DNS != "" {
-				d.DNS = body.DNS
-			}
-		})
-		if e == nil {
-			if s.Runtime != nil && s.Store.Settings().AutoApply {
-				e = s.Runtime.Apply(s.Store.State())
-			}
+		req, e := parseDevicePolicyBody(body)
+		if e != nil {
+			return e
 		}
+		d, e := s.updateDevicePolicy(id, req, nil)
 		if e == nil {
 			writeJSON(w, d)
 		}
 		return e
 	}
 	if r.Method == http.MethodPatch || r.Method == http.MethodPut {
-		var body map[string]any
+		s.discoverMu.Lock()
+		defer s.discoverMu.Unlock()
+		var body map[string]json.RawMessage
 		if e := decode(r, &body); e != nil {
 			return e
 		}
-		d, e := s.Store.UpdateDevice(id, func(d *model.Device) {
-			if v, ok := body["hidden"].(bool); ok {
-				d.Hidden = v
-			}
-			if v, ok := body["mode"].(string); ok {
-				d.Mode = normalizeMode(v)
-			}
-			if v, ok := body["node_id"].(string); ok {
-				d.NodeID = v
-			}
-			if v, ok := body["dns"].(string); ok {
-				d.DNS = v
-			}
-			if v, ok := body["online"].(bool); ok {
-				d.Online = v
-			}
-		})
-		if e == nil {
-			if s.Runtime != nil && s.Store.Settings().AutoApply {
-				e = s.Runtime.Apply(s.Store.State())
-			}
+		req, e := parseDevicePolicyBody(body)
+		if e != nil {
+			return e
 		}
+		d, e := s.updateDevicePolicy(id, req, func(d *model.Device) error { return updateDeviceMetadata(body, d) })
 		if e == nil {
 			writeJSON(w, d)
 		}
 		return e
 	}
 	if r.Method == http.MethodDelete {
-		return s.Store.DeleteDevice(id)
+		s.discoverMu.Lock()
+		defer s.discoverMu.Unlock()
+		if err := s.Store.DeleteDevice(id); err != nil {
+			return err
+		}
+		if s.Runtime != nil {
+			if err := s.Runtime.Apply(s.Store.State()); err != nil {
+				return &httpError{http.StatusInternalServerError, fmt.Sprintf("设备记录已释放，但策略重载失败：%v", err)}
+			}
+		}
+		writeJSON(w, map[string]any{"released": true, "id": id})
+		return nil
 	}
 	return methodErr()
 }
@@ -508,6 +663,8 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodPut && r.Method != http.MethodPatch {
 		return methodErr()
 	}
+	s.discoverMu.Lock()
+	defer s.discoverMu.Unlock()
 	v := s.Store.Settings()
 	if e := decode(r, &v); e != nil {
 		return e
@@ -534,17 +691,19 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 func publicNodes(in []model.Node) []map[string]any {
 	out := make([]map[string]any, 0, len(in))
 	for _, n := range in {
-		out = append(out, map[string]any{"id": n.ID, "name": n.Name, "type": n.Type, "address": n.Address, "port": n.Port, "enabled": n.Enabled})
+		out = append(out, map[string]any{"id": n.ID, "name": n.Name, "remark": n.Remark, "type": n.Type, "address": n.Address, "port": n.Port, "enabled": n.Enabled})
 	}
 	return out
 }
 func selfPayload(d model.Device, ns []model.Node) map[string]any {
-	return map[string]any{"device": d, "id": d.ID, "ip": d.IP, "mac": d.MAC, "hostname": d.Hostname, "online": d.Online, "hidden": d.Hidden, "mode": d.Mode, "node_id": d.NodeID, "dns": d.DNS, "nodes": publicNodes(ns)}
+	return map[string]any{"device": d, "id": d.ID, "ip": d.IP, "mac": d.MAC, "hostname": d.Hostname, "remark": d.Remark, "online": d.Online, "hidden": d.Hidden, "mode": d.Mode, "node_id": d.NodeID, "dns": d.DNS, "nodes": publicNodes(ns)}
 }
 func (s *Server) apply(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodPost {
 		return methodErr()
 	}
+	s.discoverMu.Lock()
+	defer s.discoverMu.Unlock()
 	st := s.Store.State()
 	if s.Runtime != nil {
 		if e := s.Runtime.Apply(st); e != nil {
@@ -672,6 +831,11 @@ func (s *Server) discoverDevices() {
 	for _, v := range seen {
 		d := byMAC[v.mac]
 		if d.ID == "" {
+			// An old lease is only an address hint. Recreate a released record
+			// once the client is actually seen online, not on every refresh.
+			if !v.online {
+				continue
+			}
 			d.ID = store.ID("dev")
 			d.Mode = s.Store.Settings().DefaultMode
 			d.FirstSeen = time.Now()
@@ -699,6 +863,33 @@ func (s *Server) discoverDevices() {
 			_, _ = s.Store.UpsertDevice(d)
 		}
 	}
+	if err := s.applyDiscoveredAddresses(existing); err != nil {
+		log.Printf("apply discovered device addresses: %v", err)
+	}
+}
+
+// A binding follows the MAC in storage, but sing-box and nftables match its
+// current IPv4 address. Refresh those rules after DHCP moves a known device.
+// Online timestamps and remarks alone must not restart all proxy connections.
+// The caller holds discoverMu; a failed reload is retried on next discovery.
+func (s *Server) applyDiscoveredAddresses(before []model.Device) error {
+	addresses := make(map[string]string, len(before))
+	for _, d := range before {
+		addresses[d.ID] = d.IP
+	}
+	for _, d := range s.Store.Devices() {
+		if previous, exists := addresses[d.ID]; exists && previous != d.IP {
+			s.discoveryNeedsApply = true
+		}
+	}
+	if !s.discoveryNeedsApply || s.Runtime == nil || !s.Store.Settings().Enabled {
+		return nil
+	}
+	if err := s.Runtime.Apply(s.Store.State()); err != nil {
+		return err
+	}
+	s.discoveryNeedsApply = false
+	return nil
 }
 
 func normalizeMAC(v string) string {

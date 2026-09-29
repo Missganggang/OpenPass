@@ -44,7 +44,7 @@ func (s *Store) load() error {
 	}
 	defaults := model.DefaultSettings()
 	if s.data.Settings.DefaultDNS == "" {
-		s.data.Settings = defaults
+		s.data.Settings.DefaultDNS = defaults.DefaultDNS
 	}
 	if s.data.Settings.DefaultMode == "" {
 		s.data.Settings.DefaultMode = defaults.DefaultMode
@@ -58,9 +58,7 @@ func (s *Store) load() error {
 	if s.data.Settings.WebPort == 0 {
 		s.data.Settings.WebPort = defaults.WebPort
 	}
-	if len(s.data.DNS) == 0 {
-		s.data.DNS = model.DefaultDNS()
-	}
+	s.data.DNS = mergeDNSProfiles(s.data.DNS)
 	if s.data.Devices == nil {
 		s.data.Devices = []model.Device{}
 	}
@@ -68,6 +66,26 @@ func (s *Store) load() error {
 		s.data.Nodes = []model.Node{}
 	}
 	return nil
+}
+
+// mergeDNSProfiles adds new built-in profiles to upgraded installations while
+// retaining their selected IDs, custom endpoints and user-defined profiles.
+// Only built-in display names are refreshed so the pinned resolver IP is clear.
+func mergeDNSProfiles(existing []model.DNS) []model.DNS {
+	out := append([]model.DNS(nil), existing...)
+	for _, preset := range model.DefaultDNS() {
+		found := false
+		for i := range out {
+			if out[i].ID == preset.ID {
+				out[i].Name = preset.Name
+				found = true
+			}
+		}
+		if !found {
+			out = append(out, preset)
+		}
+	}
+	return out
 }
 
 func (s *Store) saveLocked() error {
@@ -118,8 +136,21 @@ func ID(prefix string) string {
 }
 
 func (s *Store) UpsertDevice(d model.Device) (model.Device, error) {
+	return s.UpsertDevicePolicy(d, false)
+}
+
+// UpsertDevicePolicy saves a device and any required global activation in a
+// single state-file write. A failed write restores the in-memory state too.
+func (s *Store) UpsertDevicePolicy(d model.Device, activateProxy bool) (saved model.Device, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := s.data
+	previous.Devices = append([]model.Device(nil), s.data.Devices...)
+	defer func() {
+		if err != nil {
+			s.data = previous
+		}
+	}()
 	now := time.Now()
 	if d.ID == "" {
 		d.ID = ID("dev")
@@ -135,6 +166,9 @@ func (s *Store) UpsertDevice(d model.Device) (model.Device, error) {
 	}
 	if d.Mode != "proxy" {
 		d.NodeID = ""
+	}
+	if activateProxy && d.Mode == "proxy" {
+		s.data.Settings.Enabled = true
 	}
 	for i := range s.data.Devices {
 		sameMAC := d.MAC != "" && normalizeMAC(s.data.Devices[i].MAC) == normalizeMAC(d.MAC)
@@ -179,8 +213,13 @@ func (s *Store) DeleteDevice(id string) error {
 	defer s.mu.Unlock()
 	for i, d := range s.data.Devices {
 		if d.ID == id {
+			previous := append([]model.Device(nil), s.data.Devices...)
 			s.data.Devices = append(s.data.Devices[:i], s.data.Devices[i+1:]...)
-			return s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data.Devices = previous
+				return err
+			}
+			return nil
 		}
 	}
 	return os.ErrNotExist

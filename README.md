@@ -34,33 +34,36 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 
 设备自助页应由对应设备直接连接此路由器的局域网后访问；经过上级 NAT、反向代理或访客隔离时，路由器可能无法识别该设备的 MAC。访问地址例如 `http://10.0.0.1:8787/choose`。`openpass.lan` 需要额外配置本地 DNS，安装脚本不会自动建立此域名。
 
-首次安装默认新设备**本地直连**，全局保护保持关闭；在管理页配置节点并启用后才开始接管流量。**升级保留原有节点、设备绑定、DNS 设置及全局开关**，不会覆盖 `/etc/openpass/state.json`。
+首次安装默认新设备**本地直连**，全局保护保持关闭。在设备管理或自助页绑定有效节点时，会自动开启保护并立即应用，无需另开总开关；应用失败会显示错误。直连设备默认使用阿里 DoH（223.5.5.5），也可手动选择其他 DNS。**升级保留原有节点、设备绑定、DNS 设置及全局开关**，不会覆盖 `/etc/openpass/state.json`。
 
 **当前初版管理 API 尚无管理员鉴权，同一局域网内的设备可以管理配置。** 自助页按来源 IP 识别访问设备，但这不构成管理 API 的权限隔离。请仅在可信局域网使用，不要把管理端口映射到公网；正式访问控制将在后续版本提供。
 
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.7 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.8 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
 
-- DoH 预设：阿里、腾讯、Cloudflare、Google；可按设备选择 DNS。
-- 在线、离线、隐藏设备管理，展示内网 IP 和 MAC；在线状态按 DHCP 租约和实时邻居状态更新；支持节点绑定、解除绑定、直连和阻断。
+- DoH 预设：阿里 223.5.5.5 / 223.6.6.6、腾讯 120.53.53.53、Cloudflare、Google；可按设备选择 DNS，国内预设同样使用 HTTPS 加密解析。
+- 在线、离线、隐藏设备管理，展示内网 IP 和 MAC；在线状态按 DHCP 租约和实时邻居状态更新；支持节点绑定、解除绑定、直连、阻断、设备备注和释放。
+- 释放设备会删除 OpenPass 的设备记录及绑定，并立即清除对应策略；不修改 DHCP 租约或强制设备更换 IP。仍在线的设备会按新设备默认策略重新识别，离线设备不会仅因旧租约立即重建。
 - VLESS、VMess、Trojan、Shadowsocks、SOCKS5 节点导入，批量导入和订阅导入。
 - 节点支持备注、URI 链接导出和 JSON 配置导出（导出文件包含节点凭据，请妥善保存）。
 - Ping、TCPing、通过节点执行 URL 测试；国内/海外测试地址可修改。
 - 全局代理、代理失败断网保护；新设备默认策略可切换为直连或阻断。
-- 设备自助页展示访问设备的信息和绑定情况，允许设备选择可用节点；代理设备未单独指定 DNS 时默认使用 Cloudflare DoH，并通过绑定节点发送。
+- 设备自助页展示访问设备的信息、设备备注和绑定情况，节点选择列表显示节点备注；切换到代理且未指定 DNS 时默认使用 Cloudflare DoH，并通过绑定节点发送，切回直连则默认阿里 DoH。
 
 Ping/TCPing 只验证服务器的 ICMP/TCP 连通性，URL 测试才会验证节点协议和代理访问。部分服务器禁用 ICMP，Ping 超时并不代表节点不可用。
 
 节点服务器的域名使用阿里 DoH 单独解析，让直连无法访问海外 DNS 的网络也能建立代理连接。代理设备的网站 DNS 仍使用设备选择的 DoH，并通过绑定节点发送；节点解析失败时不会回退到明文 DNS。
 
+腾讯预设使用 `https://doh.pub/dns-query`，HTTPS 连接到 120.53.53.53 并校验 doh.pub 证书；119.29.29.29 是其普通 DNS 地址，本预设不会改用明文查询。
+
 切换直连/代理后，如果浏览器仍使用旧解析结果，可断开并重新连接 Wi-Fi，或清除系统 DNS 缓存。电脑同时连接其他有线/Wi-Fi 网络时，也可能使用另一张网卡的 DNS；验证此路由器的代理和 DNS 时应只保留对应的网络连接。
 
-当前设备策略按 IPv4 地址执行，建议为绑定代理的设备配置 DHCP 静态租约，避免地址变化后策略失配。启用保护时会阻断 LAN 设备的 IPv6 出口，以防绕过当前 IPv4 策略。
+设备绑定按 MAC 保存，策略按当前 IPv4 地址执行；刷新发现已知设备地址变化后会重载对应策略。建议为绑定代理的设备配置 DHCP 静态租约，减少地址变化到被发现之间的策略空档。启用保护时会阻断 LAN 设备的 IPv6 出口，以防绕过当前 IPv4 策略。
 
 ## 离线安装与迁移
 
@@ -115,7 +118,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.7
+make packages VERSION=0.1.8
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS
