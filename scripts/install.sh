@@ -12,6 +12,21 @@ ETC="$DESTDIR/etc"
 WWW="$DESTDIR/www"
 fail() { echo "OpenPass: $*" >&2; exit 1; }
 
+# OpenPass 0.1.2 declared the DNS NAT chain at the same priority as the
+# firewall's dnsmasq redirect chain.  A live upgrade cannot change a base
+# chain declaration in place, so remove only that old declaration before fw4
+# validates and reloads the new one.  The chain is recreated by the firewall
+# include immediately afterwards; DNS interception is briefly absent during
+# the reload, which is preferable to leaving the stale priority active.
+openpass_migrate_dns_chain() {
+	[ -z "$DESTDIR" ] || return 0
+	command -v nft >/dev/null 2>&1 || return 0
+	if nft list chain inet fw4 openpass_dns_nat 2>/dev/null | grep -q 'priority dstnat;'; then
+		echo "Migrating the OpenPass DNS firewall chain..."
+		nft delete chain inet fw4 openpass_dns_nat || fail "Could not replace the old OpenPass DNS firewall chain."
+	fi
+}
+
 machine=$(uname -m)
 case "$machine" in
 	x86_64|amd64) arch=amd64 ;;
@@ -115,6 +130,7 @@ if [ -z "$DESTDIR" ]; then
 	openpass_configure_fw4_defaults /etc/openpass/offloading-backup || fail "Could not preserve and configure firewall offloading/automatic includes."
 	# Move runtime commands out of the fw4 include directory used by old builds.
 	rm -f /etc/nftables.d/91-openpass-dynamic.nft
+	openpass_migrate_dns_chain
 	fw4 check || fail "firewall4 configuration validation failed; OpenPass has not been restarted."
 	. "$ROOT/scripts/firewall-reload.sh"
 	reload_log=$(mktemp /tmp/openpass-firewall-reload.XXXXXX)
