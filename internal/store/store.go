@@ -235,8 +235,24 @@ func (s *Store) DeleteDevice(id string) error {
 	return os.ErrNotExist
 }
 func (s *Store) UpsertNode(n model.Node) (model.Node, error) {
+	return s.UpsertNodePolicy(n, false)
+}
+
+// UpsertNodePolicy atomically persists a connection and any global activation.
+// L2TP connect must not persist an enabled tunnel without its device protections.
+func (s *Store) UpsertNodePolicy(n model.Node, activateProxy bool) (saved model.Node, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := s.data
+	previous.Nodes = append([]model.Node(nil), s.data.Nodes...)
+	defer func() {
+		if err != nil {
+			s.data = previous
+		}
+	}()
+	if activateProxy && n.Enabled {
+		s.data.Settings.Enabled = true
+	}
 	now := time.Now()
 	if n.ID == "" {
 		n.ID = ID("node")
@@ -304,8 +320,10 @@ func (s *Store) UpdateNode(id string, fn func(*model.Node) error) (model.Node, e
 			return model.Node{}, err
 		}
 		candidate.UpdatedAt = time.Now()
+		previous := s.data.Nodes[i]
 		s.data.Nodes[i] = candidate
 		if err := s.saveLocked(); err != nil {
+			s.data.Nodes[i] = previous
 			return model.Node{}, err
 		}
 		return s.data.Nodes[i], nil

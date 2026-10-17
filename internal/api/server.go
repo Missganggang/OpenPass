@@ -38,7 +38,7 @@ type Server struct {
 }
 
 func New(s *store.Store) *Server {
-	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.12"}
+	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.13"}
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 
@@ -85,6 +85,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		err = s.devices(w, r, parts[1:])
 	case "nodes":
 		err = s.nodes(w, r, parts[1:])
+	case "l2tp":
+		err = s.l2tp(w, r, parts[1:])
 	case "subscriptions":
 		err = s.subscriptions(w, r, parts[1:])
 	case "settings":
@@ -451,7 +453,13 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request, parts []string)
 func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) error {
 	if len(parts) == 0 {
 		if r.Method == http.MethodGet {
-			writeJSON(w, s.Store.Nodes())
+			ns := s.Store.Nodes()
+			for i := range ns {
+				if ns[i].Type == "l2tp" {
+					ns[i].Password, ns[i].URI = "", ""
+				}
+			}
+			writeJSON(w, ns)
 			return nil
 		}
 		if r.Method == http.MethodPost {
@@ -471,6 +479,12 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 			}
 			if n.Type == "" {
 				return fmt.Errorf("node type is required")
+			}
+			if strings.EqualFold(n.Type, "l2tp") {
+				return &httpError{http.StatusBadRequest, "请在 L2TP 管理页面添加连接"}
+			}
+			if _, err := s.findL2TP(n.ID); err == nil {
+				return &httpError{http.StatusBadRequest, "不能使用普通节点覆盖 L2TP 连接"}
 			}
 			n.Enabled = true
 			if x, e := s.Store.UpsertNode(n); e == nil {
@@ -506,6 +520,9 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 			return methodErr()
 		}
 		return s.testNode(w, r, id)
+	}
+	if n, err := s.findL2TP(id); err == nil && n.ID != "" {
+		return s.l2tp(w, r, parts)
 	}
 	if r.Method == http.MethodDelete {
 		// Serialize with device binding so a validated node cannot disappear
@@ -562,6 +579,9 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request, parts []string) e
 		if e := decode(r, &n); e != nil {
 			return e
 		}
+		if strings.EqualFold(n.Type, "l2tp") {
+			return &httpError{http.StatusBadRequest, "请在 L2TP 管理页面添加或编辑连接"}
+		}
 		n.ID = id
 		x, e := s.Store.UpsertNode(n)
 		if e == nil {
@@ -594,6 +614,9 @@ func (s *Server) exportNode(w http.ResponseWriter, r *http.Request, id string) e
 	}
 	switch format {
 	case "uri", "text", "txt":
+		if node.Type == "l2tp" {
+			return &httpError{http.StatusBadRequest, "L2TP 没有通用分享链接，请使用 JSON 导出连接配置"}
+		}
 		uri, err := nodes.URI(node)
 		if err != nil {
 			return fmt.Errorf("export node %q: %w", node.ID, err)
@@ -612,7 +635,15 @@ func (s *Server) exportNode(w http.ResponseWriter, r *http.Request, id string) e
 }
 
 func (s *Server) exportNodes(w http.ResponseWriter, r *http.Request) error {
-	ns := s.Store.Nodes()
+	// The ordinary node page excludes L2TP, so its bulk export must have the
+	// same scope. PPP credentials belong to an explicit single-connection JSON
+	// export or the full configuration backup.
+	ns := make([]model.Node, 0)
+	for _, n := range s.Store.Nodes() {
+		if n.Type != "l2tp" {
+			ns = append(ns, n)
+		}
+	}
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if format == "" {
 		format = "uri"

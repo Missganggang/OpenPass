@@ -45,6 +45,9 @@ func (s *Server) testNode(w http.ResponseWriter, r *http.Request, id string) err
 	if n.ID == "" {
 		return &httpError{http.StatusNotFound, "node not found"}
 	}
+	if n.Type == "l2tp" {
+		return &httpError{http.StatusBadRequest, "L2TP 由 OpenWrt 接口管理，请在 L2TP 页面查看连接状态，不使用 sing-box 节点检测"}
+	}
 	if body.Type == "" {
 		body.Type = "url"
 	}

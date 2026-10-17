@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"openpass/internal/l2tp"
 	"openpass/internal/model"
 	"openpass/internal/singbox"
 )
@@ -29,10 +30,14 @@ type Runtime struct {
 	FallbackNFTPath string
 	DisabledPath    string
 
-	closing atomic.Bool
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	done    chan struct{}
+	closing     atomic.Bool
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	done        chan struct{}
+	l2tpManager *l2tp.Manager
+	l2tpRoutes  *l2tpRoutes
+	l2tpState   model.State
+	l2tpStop    chan struct{}
 }
 
 type coreStartupLog struct {
@@ -75,6 +80,24 @@ func (rt *Runtime) Apply(st model.State) error {
 	if rt.closing.Load() || rt.Disabled() {
 		return fmt.Errorf("OpenPass service is stopped")
 	}
+	transition := st
+	if st.Settings.Enabled {
+		transition.Devices = append([]model.Device(nil), st.Devices...)
+		for i := range transition.Devices {
+			if transition.Devices[i].Mode == "proxy" {
+				transition.Devices[i].Mode = "blocked"
+			}
+		}
+		// Device bindings are already saved by the API. Protect the desired
+		// clients before validating dependencies or writing/checking config:
+		// an early failure must not leave a formerly direct client on the WAN.
+		if err := rt.writeFirewall(transition); err != nil {
+			return err
+		}
+	}
+	if err := rt.validateL2TP(st); err != nil {
+		return err
+	}
 	b, err := singbox.Build(st)
 	if err != nil {
 		return err
@@ -95,17 +118,10 @@ func (rt *Runtime) Apply(st model.State) error {
 			return fmt.Errorf("sing-box config check failed: %s: %w", strings.TrimSpace(string(output)), checkErr)
 		}
 	}
-	transition := st
-	if st.Settings.Enabled {
-		transition.Devices = append([]model.Device(nil), st.Devices...)
-		for i := range transition.Devices {
-			if transition.Devices[i].Mode == "proxy" {
-				transition.Devices[i].Mode = "blocked"
-			}
+	if !st.Settings.Enabled {
+		if err := rt.writeFirewall(transition); err != nil {
+			return err
 		}
-	}
-	if err := rt.writeFirewall(transition); err != nil {
-		return err
 	}
 	if err := rt.stopLocked(); err != nil {
 		return err
@@ -114,7 +130,7 @@ func (rt *Runtime) Apply(st model.State) error {
 		return fmt.Errorf("OpenPass service is stopped")
 	}
 	if !st.Settings.Enabled {
-		return nil
+		return rt.configureL2TPLocked(st)
 	}
 	if _, err := exec.LookPath(rt.SingBoxPath); err != nil {
 		return fmt.Errorf("sing-box not found at %s", rt.SingBoxPath)
@@ -152,6 +168,11 @@ func (rt *Runtime) Apply(st model.State) error {
 			rt.stopLocked()
 			return fmt.Errorf("OpenPass service is stopped")
 		}
+		// Bootstrap netifd's hostname lookup only after the DoH listener is
+		// ready. All proxy clients remain blocked during this transition.
+		if err := rt.configureL2TPLocked(st); err != nil {
+			return err
+		}
 		if err := rt.writeFirewall(st); err != nil {
 			rt.stopLocked()
 			return err
@@ -173,6 +194,13 @@ func (rt *Runtime) Shutdown() error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if err := rt.stopLocked(); err != nil {
+		return err
+	}
+	if rt.l2tpStop != nil {
+		close(rt.l2tpStop)
+		rt.l2tpStop = nil
+	}
+	if err := rt.cleanupL2TPLocked(); err != nil {
 		return err
 	}
 	if rt.Disabled() {
@@ -306,6 +334,13 @@ func writePolicyFile(path, policy string) error {
 
 func firewallPolicy(st model.State) string {
 	var proxy, direct, blocked []string
+	l2tpNodes := map[string]model.Node{}
+	for _, n := range st.Nodes {
+		if n.Type == "l2tp" {
+			l2tpNodes[n.ID] = n
+		}
+	}
+	var l2tpClients []model.Device
 	for _, d := range st.Devices {
 		ip := net.ParseIP(strings.TrimSpace(d.IP))
 		if ip == nil || ip.To4() == nil {
@@ -313,6 +348,13 @@ func firewallPolicy(st model.State) string {
 		}
 		switch d.Mode {
 		case "proxy":
+			if n, ok := l2tpNodes[d.NodeID]; ok {
+				if !n.Enabled {
+					blocked = append(blocked, ip.String())
+					continue
+				}
+				l2tpClients = append(l2tpClients, d)
+			}
 			proxy = append(proxy, ip.String())
 		case "direct":
 			direct = append(direct, ip.String())
@@ -326,6 +368,8 @@ func firewallPolicy(st model.State) string {
 	b.WriteString("flush chain inet fw4 openpass_forward\n")
 	b.WriteString("flush chain inet fw4 openpass_dns_nat\n")
 	b.WriteString("flush chain inet fw4 openpass_dns_output\n")
+	b.WriteString("flush chain inet fw4 openpass_l2tp_forward\n")
+	b.WriteString("flush chain inet fw4 openpass_l2tp_nat\n")
 	b.WriteString("flush set inet fw4 proxy_clients\n")
 	b.WriteString("flush set inet fw4 direct_clients\n")
 	b.WriteString("flush set inet fw4 blocked_clients\n")
@@ -359,6 +403,19 @@ func firewallPolicy(st model.State) string {
 		// in the interval between core exit and the process monitor running.
 		b.WriteString("add rule inet fw4 openpass_forward ip saddr @blocked_clients drop\n")
 		b.WriteString("add rule inet fw4 openpass_forward ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept\n")
+		for _, d := range l2tpClients {
+			device := l2tp.DeviceName(d.NodeID)
+			ip := net.ParseIP(strings.TrimSpace(d.IP)).String()
+			// A PPP session may disappear at any time. Match its exact egress
+			// before the generic TUN guard and reject every other egress.
+			fmt.Fprintf(&b, "add rule inet fw4 openpass_forward ip saddr %s oifname %q accept\n", ip, device)
+			fmt.Fprintf(&b, "add rule inet fw4 openpass_forward ip saddr %s drop\n", ip)
+			fmt.Fprintf(&b, "add rule inet fw4 openpass_l2tp_forward ip saddr %s oifname %q tcp flags syn tcp option maxseg size set rt mtu\n", ip, device)
+			fmt.Fprintf(&b, "add rule inet fw4 openpass_l2tp_forward ip saddr %s oifname %q accept\n", ip, device)
+			fmt.Fprintf(&b, "add rule inet fw4 openpass_l2tp_forward iifname %q ip daddr %s ct state established,related tcp flags syn tcp option maxseg size set rt mtu\n", device, ip)
+			fmt.Fprintf(&b, "add rule inet fw4 openpass_l2tp_forward iifname %q ip daddr %s ct state established,related accept\n", device, ip)
+			fmt.Fprintf(&b, "add rule inet fw4 openpass_l2tp_nat ip saddr %s oifname %q masquerade\n", ip, device)
+		}
 		b.WriteString("add rule inet fw4 openpass_forward ip saddr @proxy_clients oifname != \"openpass0\" drop\n")
 		b.WriteString("add rule inet fw4 openpass_dns_nat ip protocol udp udp dport 53 redirect to :1053\n")
 		b.WriteString("add rule inet fw4 openpass_dns_nat ip protocol tcp tcp dport 53 redirect to :1053\n")

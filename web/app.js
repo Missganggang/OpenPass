@@ -9,6 +9,8 @@
     devices: [], allDevices: [], nodes: [], subscriptions: [], nodeSubscriptionFilter: 'all', settings: {}, dns: [], status: {},
     standalone: /^\/(choose|self)\/?$/.test(location.pathname),
     self: null, selfMode: null, selfLoading: false, pendingProxy: new Set(), deletingNodes: new Set(),
+    l2tpConnections: [], l2tpDependencies: null, l2tpLoaded: false, l2tpError: '', l2tpUpdatedAt: null,
+    l2tpPending: new Set(), l2tpRefreshPromise: null, l2tpTimer: null, l2tpEditing: null, l2tpSaving: false,
     demo: false
   };
 
@@ -93,7 +95,9 @@
   function esc(value) { return String(value == null ? '' : value).replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c])); }
   function responseList(payload, key) { const list = Array.isArray(payload) ? payload : payload?.[key]; return Array.isArray(list) ? list.filter(item => item && typeof item === 'object') : []; }
   function findNode(id) { return state.nodes.find(n => String(n.id) === String(id)); }
-  function nodeLabel(node) { return [node?.name || node?.address || node?.type || '代理节点', node?.remark].filter(Boolean).join(' · '); }
+  function nodeLabel(node) { return [isL2TP(node) ? '[L2TP]' : '', node?.name || node?.address || node?.type || '代理节点', node?.remark].filter(Boolean).join(' · '); }
+  function isL2TP(node) { return String(node?.type || '').toLowerCase() === 'l2tp'; }
+  function regularNodes() { return state.nodes.filter(node => !isL2TP(node)); }
   function nodeSubscriptionID(node) {
     if (!node) return '';
     if (node.subscription_id != null) return String(node.subscription_id);
@@ -203,18 +207,20 @@
     page = page || 'dashboard'; state.page = page; location.hash = page;
     $$('.page').forEach(el => el.classList.toggle('hidden', el.dataset.pageView !== page));
     $$('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === page));
-    const title = { dashboard: '仪表盘', devices: '设备管理', nodes: '节点列表', dns: 'DNS 防泄露', settings: '设置', 'self-service': '设备自助页' }[page] || '仪表盘';
+    const title = { dashboard: '仪表盘', devices: '设备管理', nodes: '节点列表', l2tp: 'L2TP 连接', dns: 'DNS 防泄露', settings: '设置', 'self-service': '设备自助页' }[page] || '仪表盘';
     $('#pageTitle').textContent = title;
     $('#sidebar')?.classList.remove('open');
     if (page === 'devices') renderDevices(); if (page === 'nodes') { renderSubscriptions(); renderNodes(); }
+    syncL2TPPolling();
     if (page === 'self-service' && !state.standalone) loadSelf();
   }
 
   function renderAll() { renderStatus(); renderDashboard(); renderDevices(); renderSubscriptions(); renderNodes(); renderSettings(); renderDns(); navigate(state.page); }
   function renderStatus() {
-    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.12').replace(/^v/, '')}`;
+    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.13').replace(/^v/, '')}`;
     const online = state.allDevices.filter(d => d.online && !d.hidden).length; const proxied = state.allDevices.filter(d => d.mode === 'proxy' && !d.hidden).length; const healthy = state.nodes.filter(n => nodeURLResult(n) === true && n.enabled !== false).length;
-    $('#metricOnline').textContent = online; $('#metricProxied').textContent = proxied; $('#metricNodes').textContent = healthy; $('#onlineBadge').textContent = online; $('#nodesBadge').textContent = state.nodes.length; $('#onlineCount').textContent = online; $('#offlineCount').textContent = state.allDevices.filter(d => !d.online && !d.hidden).length; $('#hiddenCount').textContent = state.allDevices.filter(d => d.hidden).length; $('#hiddenTabCount').textContent = state.allDevices.filter(d => d.hidden).length;
+    $('#metricOnline').textContent = online; $('#metricProxied').textContent = proxied; $('#metricNodes').textContent = healthy; $('#onlineBadge').textContent = online; $('#nodesBadge').textContent = regularNodes().length; $('#onlineCount').textContent = online; $('#offlineCount').textContent = state.allDevices.filter(d => !d.online && !d.hidden).length; $('#hiddenCount').textContent = state.allDevices.filter(d => d.hidden).length; $('#hiddenTabCount').textContent = state.allDevices.filter(d => d.hidden).length;
+    if ($('#l2tpBadge')) $('#l2tpBadge').textContent = state.nodes.filter(isL2TP).length;
     $('#metricDns').textContent = state.settings.default_dns ? dnsName(state.settings.default_dns) : 'DoH 安全'; $('#metricDnsSub').textContent = state.settings.force_doh === false ? '加密解析未强制' : 'DoH 加密解析'; $('#kernelVersion').textContent = state.status.kernel || state.status.version || 'sing-box 运行中'; $('#routerAddress').textContent = state.status.router || 'OpenWrt · 10.0.0.1';
     const protect = $('#quickProtect'); if (protect) { const on = !!(state.settings.enabled ?? state.status.enabled); protect.innerHTML = on ? '✓ 全局保护已开启' : '◉ 开启全局保护'; protect.classList.toggle('btn-ghost', on); protect.classList.toggle('btn-primary', !on); }
     const runtimeNotice = $('#deviceRuntimeNotice');
@@ -228,7 +234,7 @@
   }
   function renderDashboard() {
     const visible = state.allDevices.filter(d => d.online && !d.hidden).slice(0, 4); $('#dashboardDevices').innerHTML = visible.length ? visible.map(d => `<div class="mini-device"><span class="device-avatar">◉</span><span class="identity"><b>${esc(d.hostname || '未命名设备')}</b><small>${esc(d.ip)} · ${esc(d.mac)}</small></span><span class="device-mode">${d.mode === 'proxy' ? esc(nodeName(d.node_id)) : d.mode === 'direct' ? '直连网络' : '已阻断'}</span></div>`).join('') : '<div class="loading-row">暂无在线设备</div>';
-    const nodes = state.nodes.slice(0, 4); $('#dashboardNodes').innerHTML = nodes.length ? nodes.map(n => { const latency = n.test_results?.url?.ok ? n.test_results.url.latency_ms : null; return `<div class="node-health"><span class="health-dot ${nodeURLResult(n) !== true ? 'off' : ''}"></span><span class="identity"><b>${esc(n.name || n.address)}</b><small>${esc((n.type || '').toUpperCase())} · ${esc(n.address || '')}</small></span><span class="latency">${latency ? `${latency} ms` : '待测试'}</span></div>`; }).join('') : '<div class="loading-row">暂无节点</div>';
+    const nodes = regularNodes().slice(0, 4); $('#dashboardNodes').innerHTML = nodes.length ? nodes.map(n => { const latency = n.test_results?.url?.ok ? n.test_results.url.latency_ms : null; return `<div class="node-health"><span class="health-dot ${nodeURLResult(n) !== true ? 'off' : ''}"></span><span class="identity"><b>${esc(n.name || n.address)}</b><small>${esc((n.type || '').toUpperCase())} · ${esc(n.address || '')}</small></span><span class="latency">${latency ? `${latency} ms` : '待测试'}</span></div>`; }).join('') : '<div class="loading-row">暂无节点</div>';
   }
   function deviceModeSelect(d) {
     const pending = state.pendingProxy.has(String(d.id));
@@ -272,13 +278,14 @@
   function renderNodes() {
     ensureNodeTestControls();
     const query = ($('#nodeSearch')?.value || '').toLowerCase();
-    let rows = state.nodes.filter(n => [n.name, n.remark, n.type, n.address, n.subscription_name, nodeSubscriptionID(n) ? subscriptionName(nodeSubscriptionID(n)) : ''].some(value => String(value || '').toLowerCase().includes(query)));
+    const ordinary = regularNodes();
+    let rows = ordinary.filter(n => [n.name, n.remark, n.type, n.address, n.subscription_name, nodeSubscriptionID(n) ? subscriptionName(nodeSubscriptionID(n)) : ''].some(value => String(value || '').toLowerCase().includes(query)));
     if (state.nodeSubscriptionFilter !== 'all') rows = rows.filter(node => nodeSubscriptionID(node) === String(state.nodeSubscriptionFilter) || String(node.subscription_name || '') === subscriptionName(state.nodeSubscriptionFilter));
     if (state.nodeFilter === 'healthy') rows = rows.filter(n => nodeURLResult(n) === true);
     if (state.nodeFilter === 'unhealthy') rows = rows.filter(n => nodeURLResult(n) === false);
-    $('#nodeAvailable').textContent = state.nodes.filter(n => nodeURLResult(n) === true).length;
-    $('#nodeChecking').textContent = state.nodes.filter(n => n.testing).length;
-    $('#nodeUnavailable').textContent = state.nodes.filter(n => nodeURLResult(n) === false).length;
+    $('#nodeAvailable').textContent = ordinary.filter(n => nodeURLResult(n) === true).length;
+    $('#nodeChecking').textContent = ordinary.filter(n => n.testing).length;
+    $('#nodeUnavailable').textContent = ordinary.filter(n => nodeURLResult(n) === false).length;
     const body = $('#nodesTable');
     if (!body) return;
     const activeSubscription = state.nodeSubscriptionFilter === 'all' ? '' : subscriptionName(state.nodeSubscriptionFilter);
@@ -294,6 +301,218 @@
       const subLabel = nodeSubscriptionID(node) ? subscriptionName(nodeSubscriptionID(node)) : '';
       return `<tr><td><div class="device-cell"><span class="device-avatar">◈</span><span class="device-name">${esc(node.name || node.address)}${node.remark ? `<small class="node-remark">备注：${esc(node.remark)}</small>` : ''}${subLabel ? `<small class="node-remark subscription-node-label">订阅：${esc(subLabel)}</small>` : ''}<small>${esc(node.address || '')}:${esc(node.port || '')}</small></span></div></td><td><span class="protocol-badge ${esc(node.type || '')}">${esc(node.type || 'unknown')}</span></td><td><span class="latency">${result?.ok ? `${esc(result.latency_ms)} ms` : '—'}</span><small class="test-caption">代理 URL 延迟</small></td><td><span class="status-label ${statusClass}"><i></i>${label}</span><div class="node-test-results">${nodeTestSummary(node)}</div></td><td class="muted">${esc(node.last_test ? timeText(node.last_test) : '—')}</td><td class="align-right"><span class="row-actions"><button class="row-action" data-action="remark-node" data-id="${esc(node.id)}" title="编辑备注">备注</button><button class="row-action node-share" data-action="copy-node" data-id="${esc(node.id)}" title="复制节点链接">复制</button><button class="row-action node-share" data-action="export-node" data-id="${esc(node.id)}" title="导出节点链接">导出</button>${actions}<button class="row-action danger" data-action="delete-node" data-id="${esc(node.id)}" title="删除节点" ${state.deletingNodes.has(String(node.id)) ? 'disabled' : ''}>×</button></span></td></tr>`;
     }).join('');
+  }
+  function l2tpOnline(connection) { return connection?.status?.connected === true || ['connected', 'online'].includes(connection?.status?.state); }
+  function l2tpStatus(connection) {
+    if (state.l2tpError) return { key: 'unknown', label: '状态待确认' };
+    if (l2tpOnline(connection)) return { key: 'online', label: '在线' };
+    const status = connection?.status || {};
+    if (status.state === 'connecting') return { key: 'connecting', label: '连接中' };
+    if (status.state === 'error') return { key: 'error', label: '连接异常' };
+    if (status.state === 'unavailable') return { key: 'error', label: '暂不可用' };
+    return { key: 'offline', label: '已断开' };
+  }
+  function l2tpDuration(seconds) {
+    if (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0) return '—';
+    seconds = Math.floor(Number(seconds));
+    const days = Math.floor(seconds / 86400), hours = Math.floor(seconds % 86400 / 3600), minutes = Math.floor(seconds % 3600 / 60);
+    return [days ? `${days} 天` : '', hours ? `${hours} 小时` : '', minutes ? `${minutes} 分钟` : '', !days && !hours && !minutes ? `${seconds} 秒` : ''].filter(Boolean).join(' ');
+  }
+  function l2tpByID(id) { return state.l2tpConnections.find(connection => String(connection.id) === String(id)); }
+  function l2tpBoundCount(connection) {
+    return Number.isInteger(connection.bound_devices) ? connection.bound_devices : state.allDevices.filter(device => String(device.node_id || '') === String(connection.id)).length;
+  }
+  function renderL2TP() {
+    const list = $('#l2tpList');
+    if (!list) return;
+    const connections = state.l2tpConnections;
+    $('#l2tpOnlineCount').textContent = state.l2tpError ? '—' : connections.filter(l2tpOnline).length;
+    $('#l2tpTotalCount').textContent = `${connections.length} 条连接`;
+    $('#l2tpBadge').textContent = connections.length;
+    $('#l2tpRefreshTime').textContent = state.l2tpRefreshPromise ? '正在刷新连接状态…' : state.l2tpError ? '刷新失败，请重试；以下数据可能已过期' : state.l2tpUpdatedAt ? `更新于 ${state.l2tpUpdatedAt.toLocaleTimeString('zh-CN')} · 每 5 秒自动刷新` : '此页面每 5 秒刷新连接状态';
+    const error = $('#l2tpLoadError'); error.textContent = state.l2tpError ? `读取连接状态失败：${state.l2tpError}` : ''; error.classList.toggle('hidden', !state.l2tpError);
+    const dependencies = state.l2tpDependencies;
+    const dependencyNotice = $('#l2tpDependencies');
+    const missing = dependencies && dependencies.available === false;
+    dependencyNotice.textContent = missing ? `L2TP 运行组件尚未就绪${Array.isArray(dependencies.missing) && dependencies.missing.length ? `：${dependencies.missing.join('、')}` : ''}。可先保存连接信息，安装所需组件后再连接。` : '';
+    dependencyNotice.classList.toggle('hidden', !missing);
+    const refresh = $('#refreshL2TPBtn'); refresh.disabled = !!state.l2tpRefreshPromise; refresh.textContent = state.l2tpRefreshPromise ? '↻ 刷新中…' : '↻ 刷新状态'; refresh.setAttribute('aria-busy', String(!!state.l2tpRefreshPromise));
+    if (!connections.length) {
+      list.innerHTML = `<div class="panel l2tp-empty"><span class="l2tp-empty-icon">⇄</span><h2>${state.l2tpError ? '暂时无法读取连接' : state.l2tpLoaded ? '添加第一条 L2TP 连接' : '正在读取连接状态…'}</h2><p>${state.l2tpError ? '点击“刷新状态”重试，已保存的连接不会因此删除。' : '填写服务器地址、用户名和密码，保存后手动连接。'}</p>${state.l2tpLoaded && !state.l2tpError ? '<button class="btn btn-primary" data-l2tp-action="add" type="button">＋ 添加 L2TP</button>' : ''}</div>`;
+      return;
+    }
+    list.innerHTML = connections.map(connection => {
+      const status = connection.status || {}, visual = l2tpStatus(connection), id = String(connection.id);
+      const busy = state.l2tpPending.has(id), connected = l2tpOnline(connection), desired = connection.enabled !== false;
+      const disabled = busy ? 'disabled' : '', connectDisabled = busy || missing || !!state.l2tpError ? 'disabled' : '';
+      const bound = l2tpBoundCount(connection);
+      return `<article class="panel l2tp-card ${visual.key === 'online' ? 'l2tp-card-online' : ''}"><div class="l2tp-card-head"><span class="l2tp-card-icon">⇄</span><div class="l2tp-card-title"><h2>${esc(connection.name || connection.address || 'L2TP 连接')}</h2><span class="mono">${esc(connection.address || '—')}</span></div><span class="l2tp-state ${visual.key}" role="status"><i></i>${visual.label}</span></div>${connection.remark ? `<p class="l2tp-remark">${esc(connection.remark)}</p>` : ''}<dl class="l2tp-details"><div><dt>接口</dt><dd class="mono">${esc(status.device || status.interface || '—')}</dd></div><div><dt>隧道 IP</dt><dd class="mono">${esc(status.local_ip || '—')}</dd></div><div><dt>连接时长</dt><dd>${connected && !state.l2tpError ? esc(l2tpDuration(status.uptime)) : '—'}</dd></div><div><dt>绑定设备</dt><dd><button class="text-btn" type="button" data-l2tp-action="devices" data-id="${esc(id)}">${bound} 台 · 查看</button></dd></div></dl>${status.last_error ? `<p class="l2tp-connection-error">${esc(status.last_error)}</p>` : ''}<div class="l2tp-card-actions">${desired || connected || status.state === 'connecting' ? `<button class="btn btn-ghost" type="button" data-l2tp-action="disconnect" data-id="${esc(id)}" ${disabled}>断开</button><button class="btn btn-primary" type="button" data-l2tp-action="reconnect" data-id="${esc(id)}" ${connectDisabled}>重新连接</button>` : `<button class="btn btn-primary" type="button" data-l2tp-action="connect" data-id="${esc(id)}" ${connectDisabled}>连接</button>`}<span class="l2tp-action-spacer"></span><button class="text-btn" type="button" data-l2tp-action="edit" data-id="${esc(id)}" ${disabled}>编辑</button><button class="text-btn" type="button" data-l2tp-action="copy" data-id="${esc(id)}" ${disabled}>复制信息</button><button class="text-btn l2tp-delete" type="button" data-l2tp-action="delete" data-id="${esc(id)}" ${disabled}>删除</button></div>${busy ? '<p class="l2tp-operation" role="status">正在处理，请稍候…</p>' : ''}</article>`;
+    }).join('');
+  }
+  async function refreshL2TP(notify = false) {
+    if (state.l2tpRefreshPromise) {
+      const ok = await state.l2tpRefreshPromise;
+      if (notify) toast(ok ? 'L2TP 状态已刷新' : `刷新失败：${state.l2tpError}`, ok ? 'success' : 'error');
+      return ok;
+    }
+    state.l2tpRefreshPromise = (async () => {
+      try {
+        const result = await api('/l2tp', { cache: 'no-store' });
+        if (!Array.isArray(result?.connections)) throw new Error('服务器返回的连接列表无效');
+        state.l2tpConnections = responseList(result, 'connections');
+        state.l2tpDependencies = result.dependencies || null;
+        state.l2tpError = ''; state.l2tpLoaded = true; state.l2tpUpdatedAt = new Date();
+        state.nodes = regularNodes().concat(state.l2tpConnections);
+        return true;
+      } catch (error) { state.l2tpError = error.message; return false; }
+    })();
+    renderL2TP();
+    const ok = await state.l2tpRefreshPromise;
+    state.l2tpRefreshPromise = null;
+    renderL2TP();
+    if (notify) toast(ok ? `L2TP 状态已刷新：${state.l2tpConnections.filter(l2tpOnline).length} 条在线` : `刷新失败：${state.l2tpError}`, ok ? 'success' : 'error');
+    return ok;
+  }
+  async function refreshL2TPGlobalState() {
+    try {
+      const [settings, status] = await Promise.all([api('/settings', { cache: 'no-store' }), api('/status', { cache: 'no-store' })]);
+      if (!settings || !status || Array.isArray(settings) || Array.isArray(status)) return false;
+      state.settings = settings; state.status = status;
+      if (settings.enabled != null) state.status.enabled = settings.enabled;
+      renderStatus(); renderSettings(); renderDevices();
+      return true;
+    } catch (_) { return false; }
+  }
+  function syncL2TPPolling() {
+    if (state.standalone || state.page !== 'l2tp' || document.hidden) {
+      if (state.l2tpTimer !== null) clearInterval(state.l2tpTimer);
+      state.l2tpTimer = null;
+      return;
+    }
+    if (state.l2tpTimer !== null) return;
+    refreshL2TP();
+    state.l2tpTimer = setInterval(() => {
+      if (state.page === 'l2tp' && !document.hidden && state.l2tpPending.size === 0 && !state.l2tpSaving) refreshL2TP();
+    }, 5000);
+  }
+  let l2tpPreviousFocus = null;
+  function openL2TPForm(id) {
+    const connection = id ? l2tpByID(id) : null;
+    if (id && !connection) return;
+    state.l2tpEditing = connection ? String(connection.id) : null;
+    l2tpPreviousFocus = document.activeElement;
+    $('#l2tpModalTitle').textContent = connection ? '编辑 L2TP 连接' : '添加 L2TP 连接';
+    $('#l2tpModalHint').textContent = connection?.enabled ? '修改连接参数后会重新连接；已绑定设备在重连期间会暂时断网。' : '保存后不会自动连接，请在连接卡片中点击“连接”。';
+    $('#l2tpName').value = connection?.name || '';
+    $('#l2tpAddress').value = connection?.address || '';
+    $('#l2tpUsername').value = connection?.username || '';
+    $('#l2tpPassword').value = ''; $('#l2tpPassword').required = !connection;
+    $('#l2tpPasswordHint').textContent = connection ? '留空表示保留已保存的密码。' : '使用服务商提供的 L2TP 密码。';
+    $('#l2tpMTU').value = connection?.mtu || 1400;
+    $('#l2tpRemark').value = connection?.remark || '';
+    $('#l2tpFormError').textContent = ''; $('#l2tpFormError').classList.add('hidden');
+    $('#l2tpModalBackdrop').classList.remove('hidden'); $('.app-shell').inert = true;
+    $('#l2tpName').focus();
+  }
+  function closeL2TPForm() {
+    if (state.l2tpSaving) return;
+    $('#l2tpModalBackdrop').classList.add('hidden'); $('.app-shell').inert = false;
+    $('#l2tpPassword').value = ''; state.l2tpEditing = null;
+    if (l2tpPreviousFocus?.isConnected) l2tpPreviousFocus.focus();
+  }
+  async function saveL2TP(event) {
+    event.preventDefault();
+    if (state.l2tpSaving || !$('#l2tpForm').reportValidity()) return;
+    const id = state.l2tpEditing;
+    const body = { name: $('#l2tpName').value.trim(), address: $('#l2tpAddress').value.trim(), username: $('#l2tpUsername').value.trim(), remark: $('#l2tpRemark').value.trim(), mtu: Number($('#l2tpMTU').value) };
+    const password = $('#l2tpPassword').value;
+    if (password || !id) body.password = password;
+    if (!id) body.enabled = false;
+    if (!body.name || !body.address || !body.username) { $('#l2tpFormError').textContent = '请填写连接名称、服务器地址和用户名。'; $('#l2tpFormError').classList.remove('hidden'); return; }
+    state.l2tpSaving = true; $('#saveL2TPBtn').disabled = true; $('#saveL2TPBtn').textContent = '保存中…';
+    $('#l2tpModalClose').disabled = true; $('#l2tpModalCancel').disabled = true;
+    let saved = false;
+    try {
+      if (state.l2tpRefreshPromise) await state.l2tpRefreshPromise;
+      await api(`/l2tp${id ? `/${encodeURIComponent(id)}` : ''}`, { method: id ? 'PATCH' : 'POST', body });
+      saved = true; state.l2tpSaving = false; closeL2TPForm();
+      const refreshed = await refreshL2TP();
+      toast(refreshed ? id ? 'L2TP 连接已保存' : 'L2TP 已添加，点击“连接”后即可供设备选择' : '连接已保存，但状态刷新失败，请手动刷新', refreshed ? 'success' : 'error');
+    } catch (error) {
+      if (!saved) { $('#l2tpFormError').textContent = `保存失败：${error.message}`; $('#l2tpFormError').classList.remove('hidden'); }
+      else toast(`连接已保存，但刷新失败：${error.message}`, 'error');
+    } finally {
+      state.l2tpSaving = false; $('#saveL2TPBtn').disabled = false; $('#saveL2TPBtn').textContent = '保存连接';
+      $('#l2tpModalClose').disabled = false; $('#l2tpModalCancel').disabled = false;
+    }
+  }
+  async function runL2TPAction(action, id) {
+    if (action === 'add') { openL2TPForm(); return; }
+    const connection = l2tpByID(id);
+    if (!connection || state.l2tpPending.has(String(id))) return;
+    if (action === 'edit') { openL2TPForm(id); return; }
+    if (action === 'devices') {
+      try {
+        const devices = responseList(await api('/devices?hidden=all', { cache: 'no-store' }), 'devices');
+        state.allDevices = devices;
+        const bound = devices.filter(device => String(device.node_id || '') === String(id));
+        connection.bound_devices = bound.length; renderL2TP();
+        const lines = bound.map(device => `• ${device.remark || device.hostname || '未命名设备'}${device.hidden ? '（隐藏）' : ''} · ${device.online ? '在线' : '离线'}\n  ${device.ip || 'IP 未知'} · ${device.mac || 'MAC 未知'}`);
+        await showActionDialog({ title: '绑定这条 L2TP 的设备', message: `${connection.name || connection.address}\n\n${lines.length ? lines.join('\n\n') : '尚无设备绑定此连接。'}\n\n可在设备管理中调整绑定。`, submitText: '知道了' });
+      } catch (error) { toast(`读取绑定设备失败：${error.message}`, 'error'); }
+      return;
+    }
+    if (action === 'copy') {
+      const status = connection.status || {};
+      const info = [`名称：${connection.name || ''}`, '协议：L2TP', `服务器：${connection.address || ''}`, `状态：${l2tpStatus(connection).label}`, `接口：${status.device || status.interface || '—'}`, `隧道 IP：${status.local_ip || '—'}`, connection.remark ? `备注：${connection.remark}` : ''].filter(Boolean).join('\n');
+      const copied = await copyText(info);
+      toast(copied ? '连接信息已复制（不含账号密码）' : '复制失败，请检查浏览器剪贴板权限', copied ? 'success' : 'error'); return;
+    }
+    if (!['connect', 'disconnect', 'reconnect', 'delete'].includes(action)) return;
+    state.l2tpPending.add(String(id)); renderL2TP();
+    try {
+      if (action === 'delete') {
+        const devices = responseList(await api('/devices?hidden=all', { cache: 'no-store' }), 'devices');
+        state.allDevices = devices;
+        const bound = devices.filter(device => String(device.node_id || '') === String(id));
+        if (bound.length) { await showNodeBindings(id, bound); return; }
+        const confirmed = await showActionDialog({ title: '删除 L2TP 连接', message: `确认删除“${connection.name || connection.address}”？此操作会断开连接并删除保存的账号信息。`, submitText: '确认删除', danger: true });
+        if (!confirmed) return;
+      } else if (action === 'disconnect' || action === 'reconnect') {
+        const confirmed = await showActionDialog({ title: action === 'disconnect' ? '断开 L2TP 连接' : '重新连接 L2TP', message: `“${connection.name || connection.address}”当前绑定 ${l2tpBoundCount(connection)} 台设备。${action === 'disconnect' ? '断开后' : '重新连接期间'}，这些设备会断网，不会回退到本地直连。设备绑定会保留。`, submitText: action === 'disconnect' ? '确认断开' : '重新连接', danger: action === 'disconnect' });
+        if (!confirmed) return;
+      }
+      if (state.l2tpRefreshPromise) await state.l2tpRefreshPromise;
+      await api(`/l2tp/${encodeURIComponent(id)}${action === 'delete' ? '' : `/${action}`}`, { method: action === 'delete' ? 'DELETE' : 'POST' });
+      const refreshed = await refreshL2TP();
+      const message = { connect: '已发起 L2TP 连接，在线状态会自动更新', disconnect: '连接已断开，设备绑定已保留', reconnect: '已发起重新连接，请等待状态更新', delete: 'L2TP 连接已删除' }[action];
+      const globalRefreshed = action === 'connect' || action === 'reconnect' ? await refreshL2TPGlobalState() : true;
+      toast(refreshed && globalRefreshed ? message : `${message}；但${!globalRefreshed ? '全局' : '连接'}状态刷新失败，请刷新页面`, refreshed && globalRefreshed ? 'success' : 'error');
+    } catch (error) {
+      if (error.status === 409 && action === 'delete') await showNodeBindings(id, responseList(error.data, 'bound_devices'), error.message);
+      else toast(`操作失败：${error.message}`, 'error');
+      await refreshL2TP();
+      if (action === 'connect' || action === 'reconnect') await refreshL2TPGlobalState();
+    } finally { state.l2tpPending.delete(String(id)); renderL2TP(); }
+  }
+  function setupL2TPEvents() {
+    $('#addL2TPBtn')?.addEventListener('click', () => openL2TPForm());
+    $('#refreshL2TPBtn')?.addEventListener('click', () => refreshL2TP(true));
+    $('#l2tpList')?.addEventListener('click', event => { const button = event.target.closest('[data-l2tp-action]'); if (button && !button.disabled) runL2TPAction(button.dataset.l2tpAction, button.dataset.id); });
+    $('#l2tpForm')?.addEventListener('submit', saveL2TP);
+    $('#l2tpModalClose')?.addEventListener('click', closeL2TPForm); $('#l2tpModalCancel')?.addEventListener('click', closeL2TPForm);
+    $('#l2tpModalBackdrop')?.addEventListener('click', event => { if (event.target.id === 'l2tpModalBackdrop') closeL2TPForm(); });
+    document.addEventListener('visibilitychange', syncL2TPPolling);
+    document.addEventListener('keydown', event => {
+      if ($('#l2tpModalBackdrop').classList.contains('hidden')) return;
+      if (event.key === 'Escape') { event.preventDefault(); closeL2TPForm(); }
+      if (event.key === 'Tab') {
+        const controls = $$('button:not(:disabled), input:not(:disabled), textarea:not(:disabled)', $('#l2tpModalBackdrop'));
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    });
   }
   function ensureNodeTestControls() {
     const toolbar = $('.node-toolbar');
@@ -399,7 +618,7 @@
   }
   async function testNode(id, type = 'url') {
     const node = findNode(id);
-    if (!node || node.testing) return;
+    if (!node || isL2TP(node) || node.testing) return;
     const testURL = $('#urlTestAddress')?.value.trim() || state.settings.url_test_address || 'https://www.gstatic.com/generate_204';
     node.testing = type;
     renderNodes();
@@ -421,7 +640,7 @@
   async function testAllNodes() {
     const button = $('#testAllBtn');
     button.disabled = true;
-    try { for (const node of state.nodes) await testNode(node.id, 'url'); }
+    try { for (const node of regularNodes()) await testNode(node.id, 'url'); }
     finally { button.disabled = false; }
   }
   async function saveSettings() { const body = { kill_switch: $('#killSwitch').checked, default_mode: $('#newDevicePolicy').value, self_service_enabled: $('#selfServiceEnabled').checked, hide_ap: $('#hideAp').checked }; try { if (!state.demo) { await api('/settings', { method: 'PUT', body }); await loadData(true); } else { state.settings = { ...state.settings, ...body }; renderStatus(); } toast('系统设置已保存'); } catch (error) { toast(`保存或刷新失败：${error.message}`, 'error'); } }
@@ -670,6 +889,7 @@
   setupEvents();
   setupSelfEvents();
   setupNodeTestTypeEvents();
+  setupL2TPEvents();
   state.page = location.hash.slice(1) || 'dashboard';
   bootstrap();
 })();

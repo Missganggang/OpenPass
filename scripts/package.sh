@@ -2,7 +2,7 @@
 # Build a static, self-contained OpenWrt release archive.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${VERSION:-0.1.12}
+VERSION=${VERSION:-0.1.13}
 ARCH=${ARCH:-amd64}
 GO=${GO:-go}
 OUT_DIR=${OUT_DIR:-$ROOT/dist}
@@ -19,7 +19,7 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/openpass-package.XXXXXX")
 trap 'rm -rf "$work"' 0
 trap 'exit 1' 1 2 15
 PKGROOT="$work/openpass"
-mkdir -p "$PKGROOT/usr/bin" "$PKGROOT/usr/share/openpass/web" "$PKGROOT/usr/share/nftables.d/ruleset-post" "$PKGROOT/etc/init.d" "$PKGROOT/etc/nftables.d" "$PKGROOT/luci-app-openpass" "$PKGROOT/scripts"
+mkdir -p "$PKGROOT/usr/bin" "$PKGROOT/usr/share/openpass/web" "$PKGROOT/usr/share/nftables.d/ruleset-post" "$PKGROOT/usr/share/nftables.d/chain-pre/forward" "$PKGROOT/etc/init.d" "$PKGROOT/etc/nftables.d" "$PKGROOT/luci-app-openpass" "$PKGROOT/scripts"
 echo "Building OpenPass $VERSION for linux/$ARCH"
 cd "$ROOT"
 GOOS=linux GOARCH="$ARCH" CGO_ENABLED=0 "$GO" build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$PKGROOT/usr/bin/openpassd" ./cmd/openpass
@@ -27,9 +27,10 @@ cp "$ROOT/web/index.html" "$ROOT/web/app.js" "$ROOT/web/styles.css" "$PKGROOT/us
 cp "$ROOT/openwrt/openpass.init" "$PKGROOT/etc/init.d/openpass"
 cp "$ROOT/openwrt/90-openpass.nft" "$PKGROOT/etc/nftables.d/90-openpass.nft"
 cp "$ROOT/openwrt/92-openpass-policy.nft" "$PKGROOT/usr/share/nftables.d/ruleset-post/92-openpass-policy.nft"
+cp "$ROOT/openwrt/30-openpass-l2tp.nft" "$PKGROOT/usr/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft"
 cp -R "$ROOT/luci-app-openpass/." "$PKGROOT/luci-app-openpass/"
 [ -f "$PKGROOT/luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js" ] || { echo "LuCI JavaScript view is missing" >&2; exit 1; }
-cp "$ROOT/scripts/install.sh" "$ROOT/scripts/firewall-reload.sh" "$ROOT/scripts/firewall-settings.sh" "$ROOT/scripts/backup.sh" "$ROOT/scripts/restore.sh" "$PKGROOT/scripts/"
+cp "$ROOT/scripts/install.sh" "$ROOT/scripts/firewall-reload.sh" "$ROOT/scripts/firewall-settings.sh" "$ROOT/scripts/firewall-l2tp.sh" "$ROOT/scripts/backup.sh" "$ROOT/scripts/restore.sh" "$PKGROOT/scripts/"
 cp "$ROOT/scripts/maintenance.sh" "$ROOT/scripts/uninstall.sh" "$PKGROOT/scripts/"
 cp "$ROOT/install.sh" "$PKGROOT/scripts/update.sh"
 cat >"$PKGROOT/install.sh" <<'SH'

@@ -7,7 +7,7 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/openpass-install-test.XXXXXX")
 trap 'rm -rf "$work"' 0
 trap 'exit 1' 1 2 15
 tar -xzf "$ARCHIVE" -C "$work"
-for policy in "$work/openpass/etc/nftables.d/90-openpass.nft" "$work/openpass/usr/share/nftables.d/ruleset-post/92-openpass-policy.nft"; do
+for policy in "$work/openpass/etc/nftables.d/90-openpass.nft" "$work/openpass/usr/share/nftables.d/ruleset-post/92-openpass-policy.nft" "$work/openpass/usr/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft"; do
 	if LC_ALL=C grep -q "$(printf '\r')" "$policy"; then
 		echo "Firewall policy must use LF line endings: $policy" >&2
 		exit 1
@@ -23,8 +23,11 @@ include="$work/staged/usr/share/nftables.d/ruleset-post/92-openpass-policy.nft"
 test -r "$include"
 grep -Fx 'include "/etc/openpass/firewall-policy*.nft"' "$include" >/dev/null
 grep -Fx 'include "/var/run/openpass/91-openpass-*.nft"' "$include" >/dev/null
+test -r "$work/staged/usr/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft"
+grep -F 'jump openpass_l2tp_forward comment "openpass-l2tp-forward"' "$work/staged/usr/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft" >/dev/null
 test -f "$work/openpass/scripts/firewall-reload.sh"
 test -f "$work/openpass/scripts/firewall-settings.sh"
+test -f "$work/openpass/scripts/firewall-l2tp.sh"
 for helper in maintenance.sh uninstall.sh update.sh; do
 	test -x "$work/staged/usr/share/openpass/$helper"
 done

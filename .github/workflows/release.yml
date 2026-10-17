@@ -36,9 +36,11 @@ jobs:
           node --check web/app.js
           node --check luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js
           node scripts/tests/luci-maintenance.cjs
+          node scripts/tests/l2tp-ui.cjs
           for script in install.sh scripts/*.sh openwrt/openpass.init luci-app-openpass/root/usr/libexec/rpcd/openpass; do sh -n "$script"; done
           sh scripts/tests/firewall-reload.sh
           sh scripts/tests/firewall-settings.sh
+          sh scripts/tests/firewall-l2tp.sh
           sh scripts/tests/service-stop.sh
           sh scripts/tests/service-control.sh
           sh scripts/tests/maintenance.sh

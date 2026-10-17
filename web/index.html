@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta name="theme-color" content="#0b1220" />
   <title>OpenPass · 软路由代理管理</title>
-  <link rel="stylesheet" href="/styles.css?v=0.1.12" />
+  <link rel="stylesheet" href="/styles.css?v=0.1.13" />
 </head>
 <body>
   <div class="app-shell">
@@ -15,11 +15,12 @@
         <a href="#dashboard" class="nav-item active" data-page="dashboard"><span class="nav-icon">⌂</span>仪表盘</a>
         <a href="#devices" class="nav-item" data-page="devices"><span class="nav-icon">◉</span>设备管理 <b class="nav-badge" id="onlineBadge">0</b></a>
         <a href="#nodes" class="nav-item" data-page="nodes"><span class="nav-icon">◈</span>节点列表 <b class="nav-badge" id="nodesBadge">0</b></a>
+        <a href="#l2tp" class="nav-item" data-page="l2tp"><span class="nav-icon">⇄</span>L2TP 连接 <b class="nav-badge" id="l2tpBadge">0</b></a>
         <a href="#dns" class="nav-item" data-page="dns"><span class="nav-icon">◌</span>DNS 防泄露</a>
         <a href="#settings" class="nav-item" data-page="settings"><span class="nav-icon">⚙</span>设置</a>
         <a href="#self-service" class="nav-item" data-page="self-service"><span class="nav-icon">⌁</span>设备自助页</a>
       </nav>
-      <div class="sidebar-bottom"><div class="kernel-state"><i></i><div><span>sing-box 内核</span><small id="kernelVersion">检测中…</small></div></div><div class="sidebar-footer" id="appVersion">OpenPass v0.1.12</div></div>
+      <div class="sidebar-bottom"><div class="kernel-state"><i></i><div><span>sing-box 内核</span><small id="kernelVersion">检测中…</small></div></div><div class="sidebar-footer" id="appVersion">OpenPass v0.1.13</div></div>
     </aside>
     <div class="main-wrap">
       <header class="topbar"><button class="icon-btn mobile-menu" id="menuBtn" aria-label="展开菜单">☰</button><div class="breadcrumb"><span>OpenPass</span><b>/</b><strong id="pageTitle">仪表盘</strong></div><div class="top-actions"><button class="icon-btn" id="refreshBtn" title="刷新数据">↻</button><div class="router-chip"><span class="status-dot"></span><span id="routerAddress">OpenWrt · 10.0.0.1</span></div><div class="avatar">O</div></div></header>
@@ -65,10 +66,38 @@
             <article class="panel self-info"><div class="panel-head"><div><h2>如何使用</h2><p class="muted">每台设备只修改自己的网络方式</p></div></div><ol class="steps"><li><i>1</i><div><b>连接路由器网络</b><small>手机或电脑连接到本软路由的 Wi-Fi 或局域网。</small></div></li><li><i>2</i><div><b>用自己的设备打开地址</b><small>浏览器访问 <code class="self-instructions-url">/choose</code>。</small></div></li><li><i>3</i><div><b>核对 IP 和 MAC 地址</b><small>页面显示当前访问设备的信息；电脑和手机访问时会显示各自的地址。</small></div></li><li><i>4</i><div><b>选择并保存</b><small>选择本地直连，或选择代理节点后保存。管理员后台会同步更新绑定。</small></div></li></ol><div class="self-tip"><span>💡</span><p>如果使用额外的 AP，请使用桥接模式，让软路由能够识别每台设备。</p></div></article>
           </div>
         </section>
+        <section class="page hidden" id="page-l2tp" data-page-view="l2tp">
+          <div class="page-heading"><div><p class="eyebrow">TUNNEL / 隧道</p><h1>L2TP 连接</h1><p class="muted">连接后，在设备管理或设备自助页中选择这条线路。</p></div><div class="heading-actions"><button class="btn btn-ghost" id="refreshL2TPBtn" type="button">↻ 刷新状态</button><button class="btn btn-primary" id="addL2TPBtn" type="button">＋ 添加 L2TP</button></div></div>
+          <div class="l2tp-summary"><div><span class="summary-dot green"></span><b id="l2tpOnlineCount">0</b><span>条在线</span><span class="l2tp-summary-divider"></span><span id="l2tpTotalCount">0 条连接</span></div><p id="l2tpRefreshTime" role="status">此页面每 5 秒刷新连接状态</p></div>
+          <p class="self-notice notice-warning hidden" id="l2tpDependencies" role="status"></p>
+          <p class="self-error hidden" id="l2tpLoadError" role="alert"></p>
+          <div class="l2tp-grid" id="l2tpList"><div class="panel l2tp-empty">正在读取连接状态…</div></div>
+          <div class="l2tp-footnote"><span>ⓘ</span><p>这里管理纯 L2TP，协议本身不提供加密。连接中断时，已绑定设备会断网，不会自动改用本地直连；“在线”表示隧道已建立，实际出口可用性仍取决于服务商。</p></div>
+        </section>
       </main>
     </div>
   </div>
   <div class="toast-stack" id="toastStack" role="status" aria-live="polite" aria-atomic="false"></div>
+
+  <div class="modal-backdrop hidden" id="l2tpModalBackdrop">
+    <section class="modal l2tp-modal" role="dialog" aria-modal="true" aria-labelledby="l2tpModalTitle" aria-describedby="l2tpModalHint">
+      <button class="modal-close" id="l2tpModalClose" type="button" aria-label="关闭 L2TP 表单">×</button>
+      <form id="l2tpForm">
+        <div class="modal-head"><div class="modal-icon">⇄</div><div><h2 id="l2tpModalTitle">添加 L2TP 连接</h2><p class="muted">纯 L2TP · 用户名与密码认证</p></div></div>
+        <p class="l2tp-form-hint" id="l2tpModalHint">保存后不会自动连接，请在连接卡片中点击“连接”。</p>
+        <div class="l2tp-form-grid">
+          <label class="field-label l2tp-form-wide" for="l2tpName">连接名称<input class="input" id="l2tpName" maxlength="100" required placeholder="例如：香港办公线路" autocomplete="off" /></label>
+          <label class="field-label l2tp-form-wide" for="l2tpAddress">服务器地址<input class="input mono" id="l2tpAddress" maxlength="253" required placeholder="服务器 IPv4 地址或域名" autocomplete="off" autocapitalize="none" spellcheck="false" /><span>只填写地址，不含协议前缀或端口。</span></label>
+          <label class="field-label" for="l2tpUsername">用户名<input class="input" id="l2tpUsername" maxlength="256" required autocomplete="off" autocapitalize="none" spellcheck="false" /></label>
+          <label class="field-label" for="l2tpPassword">密码<input class="input" id="l2tpPassword" type="password" maxlength="256" required autocomplete="new-password" /><span id="l2tpPasswordHint">使用服务商提供的 L2TP 密码。</span></label>
+          <label class="field-label" for="l2tpMTU">MTU<input class="input" id="l2tpMTU" type="number" min="1280" max="1460" step="1" value="1400" required /><span>默认 1400，一般无需修改。</span></label>
+          <label class="field-label l2tp-form-wide" for="l2tpRemark">备注<textarea class="textarea" id="l2tpRemark" rows="2" maxlength="200" placeholder="地区或用途，设备自助页也会显示"></textarea></label>
+        </div>
+        <p class="action-dialog-error hidden" id="l2tpFormError" role="alert"></p>
+        <div class="modal-foot"><button class="btn btn-ghost" id="l2tpModalCancel" type="button">取消</button><button class="btn btn-primary" id="saveL2TPBtn" type="submit">保存连接</button></div>
+      </form>
+    </section>
+  </div>
 
   <div class="modal-backdrop hidden" id="modalBackdrop"><div class="modal" id="importModal"><button class="modal-close" id="modalClose">×</button><div class="modal-head"><div class="modal-icon">◈</div><div><h2>导入节点</h2><p class="muted">支持分享链接、JSON 或订阅地址</p></div></div><div class="import-tabs"><button class="import-tab active" data-import-tab="text">节点内容</button><button class="import-tab" data-import-tab="subscription">订阅地址</button></div><div id="importTextPane"><label class="field-label">粘贴节点链接或配置<span>每行一个节点，支持 vless://、vmess://、socks5:// 等格式</span></label><textarea class="textarea" id="nodeImportText" rows="6" placeholder="vless://...\nvmess://...\nsocks5://..."></textarea></div><div id="importSubscriptionPane" class="hidden"><label class="field-label">订阅地址<span>保存后可在订阅卡片中手动刷新节点</span></label><input class="input" id="subscriptionUrl" placeholder="https://example.com/subscription" /><label class="field-label subscription-field">订阅名称<span>例如：Hello、海外线路、家庭节点</span></label><input class="input" id="subscriptionName" placeholder="请输入订阅名称" maxlength="100" /><label class="field-label subscription-field">订阅备注<span>可填写服务商、地区或用途，留空也可以</span></label><input class="input" id="subscriptionRemark" placeholder="例如：每月更新的海外节点" maxlength="200" /></div><div class="modal-foot"><button class="btn btn-ghost" id="modalCancel">取消</button><button class="btn btn-primary" id="importSubmit">开始导入</button></div></div></div>
   <div class="modal-backdrop hidden" id="actionDialogBackdrop">
@@ -83,6 +112,6 @@
       </form>
     </section>
   </div>
-  <script src="/app.js?v=0.1.12"></script>
+  <script src="/app.js?v=0.1.13"></script>
 </body>
 </html>

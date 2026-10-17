@@ -20,7 +20,7 @@ assert shutil.which("flock") and shutil.which("setsid")
 with tempfile.TemporaryDirectory(prefix="openpass-maintenance-test.") as directory:
     work = Path(directory)
     for name in ["bin", "etc/init.d", "etc/openpass", "etc/rc.d", "usr/bin", "usr/share/openpass", "usr/share/libubox",
-                 "usr/share/luci/menu.d", "usr/share/rpcd/acl.d", "usr/libexec/rpcd", "usr/share/nftables.d/ruleset-post",
+                 "usr/share/luci/menu.d", "usr/share/rpcd/acl.d", "usr/libexec/rpcd", "usr/share/nftables.d/ruleset-post", "usr/share/nftables.d/chain-pre/forward",
                  "www/luci-static/resources/view/openpass", "etc/nftables.d", "var/lock", "var/run/openpass", "var/etc/openpass", "tmp"]:
         (work / name).mkdir(parents=True, exist_ok=True)
     def patched(path):
@@ -77,7 +77,14 @@ elif mode == "ubus":
     print(json.dumps({"openpass": {"instances": {"openpass": {"running": (root / "running").exists()}}}}))
 elif mode == "jsonfilter":
     value = json.load(sys.stdin)
-    print(str(value["openpass"]["instances"]["openpass"]["running"]).lower())
+    if "nftables" in value:
+        assert args == ["-e", '@.nftables[@.rule.comment="openpass-l2tp-forward"].rule.handle'], args
+        found = False
+        for item in value["nftables"]:
+            if item.get("rule", {}).get("comment") == "openpass-l2tp-forward":
+                print(item["rule"]["handle"]); found = True
+        if not found: sys.exit(1)
+    else: print(str(value["openpass"]["instances"]["openpass"]["running"]).lower())
 elif mode == "id":
     assert args == ["-u"], args
     print(0)
@@ -86,8 +93,17 @@ elif mode == "ip":
     sys.exit(0 if os.environ.get("TEST_TUN_REMAINS") else 1)
 elif mode == "nft":
     if args == ["list", "ruleset"]: sys.exit(0)
+    if args == ["-j", "-a", "list", "chain", "inet", "fw4", "forward"]:
+        rules = [{"rule": {"comment": "other-proxy", "handle": 43}}]
+        if not os.environ.get("TEST_NO_L2TP_JUMP"): rules.insert(0, {"rule": {"comment": "openpass-l2tp-forward", "handle": 42}})
+        print(json.dumps({"nftables": rules}))
+        sys.exit(0)
+    if args == ["delete", "rule", "inet", "fw4", "forward", "handle", "42"]:
+        action("nft " + " ".join(args))
+        if os.environ.get("TEST_NFT_FAIL"): sys.exit(1)
+        sys.exit(0)
     assert args[0] in {"list", "delete"} and args[1] in {"chain", "set"} and args[2:4] == ["inet", "fw4"], args
-    assert args[4] in {"openpass_prerouting", "openpass_output", "openpass_forward", "openpass_dns_nat", "openpass_dns_output", "proxy_clients", "direct_clients", "blocked_clients"}, args
+    assert args[4] in {"openpass_prerouting", "openpass_output", "openpass_forward", "openpass_dns_nat", "openpass_dns_output", "openpass_l2tp_forward", "openpass_l2tp_nat", "proxy_clients", "direct_clients", "blocked_clients"}, args
     if args[0] == "delete":
         action("nft " + " ".join(args))
         if os.environ.get("TEST_NFT_FAIL"): sys.exit(1)
@@ -122,7 +138,7 @@ while [ ! -e "$TEST_ROOT/allow-install" ]; do sleep 0.1; done
 [ -z "${TEST_INSTALL_FAIL:-}" ] || exit 1
 printf '%s' "${OPENPASS_VERSION#v}" >"$TEST_ROOT/version"
 ''')
-        for name in ["etc/openwrt_release", "etc/nftables.d/90-openpass.nft", "usr/share/nftables.d/ruleset-post/92-openpass-policy.nft",
+        for name in ["etc/openwrt_release", "etc/nftables.d/90-openpass.nft", "usr/share/nftables.d/ruleset-post/92-openpass-policy.nft", "usr/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft",
                      "usr/share/luci/menu.d/luci-app-openpass.json", "usr/share/rpcd/acl.d/luci-app-openpass.json", "usr/libexec/rpcd/openpass",
                      "www/luci-static/resources/view/openpass/service.js", "var/etc/openpass/sing-box.json", "var/run/openpass/91-openpass-dynamic.nft"]:
             (work / name).write_text("fixture")
@@ -195,9 +211,13 @@ printf '%s' "${OPENPASS_VERSION#v}" >"$TEST_ROOT/version"
             assert (work / name).exists(), (failure, name)
     response = invoke("uninstall", {"confirm": True})
     assert response == {"uninstalled": True, "config_kept": True}, response
+    cleanup_actions = (work / "actions").read_text().splitlines()
+    assert "nft delete rule inet fw4 forward handle 42" in cleanup_actions
+    assert "nft delete rule inet fw4 forward handle 43" not in cleanup_actions
+    assert cleanup_actions.index("nft delete rule inet fw4 forward handle 42") < cleanup_actions.index("nft delete chain inet fw4 openpass_l2tp_forward")
     assert (work / "etc/openpass/state.json").read_text() == '{"nodes":["preserve"]}'
     for name in ["usr/bin/openpassd", "usr/share/openpass", "usr/share/luci/menu.d/luci-app-openpass.json", "usr/libexec/rpcd/openpass",
-                 "www/luci-static/resources/view/openpass", "etc/nftables.d/90-openpass.nft", "usr/share/nftables.d/ruleset-post/92-openpass-policy.nft"]:
+                 "www/luci-static/resources/view/openpass", "etc/nftables.d/90-openpass.nft", "usr/share/nftables.d/ruleset-post/92-openpass-policy.nft", "usr/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft"]:
         assert not (work / name).exists(), name
     assert (work / "usr/bin/sing-box").read_text() == "shared core"
     assert (work / "etc/init.d/other-proxy").read_text() == "other service"
@@ -205,7 +225,7 @@ printf '%s' "${OPENPASS_VERSION#v}" >"$TEST_ROOT/version"
     for name in ["usr/share/openpass", "www/luci-static/resources/view/openpass", "var/run/openpass", "var/etc/openpass"]:
         (work / name).mkdir(parents=True, exist_ok=True)
     install_fixture()
-    response = invoke("uninstall", {"confirm": True, "keep_config": False})
+    response = invoke("uninstall", {"confirm": True, "keep_config": False}, TEST_NO_L2TP_JUMP="1")
     assert response == {"uninstalled": True, "config_kept": False}, response
     assert not (work / "etc/openpass").exists()
     assert (work / "usr/bin/sing-box").exists() and (work / "etc/init.d/other-proxy").exists()

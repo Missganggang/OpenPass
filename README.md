@@ -1,6 +1,6 @@
 # OpenPass
 
-OpenPass 是面向 x86 OpenWrt 的 sing-box 代理管理器，包含独立 Web 管理页面、设备自助页面和 LuCI 快捷入口。后端为 Go 静态程序，路由器不需要安装 Go、Node.js 或 Python。
+OpenPass 是面向 x86 OpenWrt 的代理管理器，支持 sing-box 节点和通过 OpenWrt 原生接口管理的纯 L2TP 连接，包含独立 Web 管理页面、设备自助页面和 LuCI 快捷入口。后端为 Go 静态程序，路由器不需要安装 Go、Node.js 或 Python。
 
 ## 一键安装或升级
 
@@ -20,7 +20,7 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 
 如果旧版启用 DNS 保护后出现“无法解析下载域名”，请先从电脑下载下方的离线包上传升级；安装过程不会为下载而放开明文 DNS。
 
-支持使用 opkg 或 apk 的 OpenWrt x86_64 / 32 位 x86。脚本会通过系统软件源安装缺少的 sing-box、firewall4、nftables、TUN 模块、CA 证书和 LuCI；软件源和内核模块必须与固件匹配。要求 sing-box 1.12 或更新的 1.x 版本，目前实机验证为 OpenWrt 25.12 / sing-box 1.14。
+支持使用 opkg 或 apk 的 OpenWrt x86_64 / 32 位 x86。脚本会通过系统软件源安装缺少的 sing-box、firewall4、nftables、TUN 模块、CA 证书和 LuCI，以及 L2TP 所需的 xl2tpd、ppp、ppp-mod-pppol2tp 和 ip-full；L2TP 内核模块由软件包依赖自动安装，软件源和内核模块必须与固件匹配。普通代理要求 sing-box 1.12 或更新的 1.x 版本；**L2TP 需要 sing-box 1.14 或更新的 1.x 版本**，以便将 L2TP 设备从 TUN 接管范围中排除。目前实机环境为 OpenWrt 25.12 / sing-box 1.14。
 
 部分定制固件的 firewall4 在缺少 `/etc/firewall.include` 时会误报重载失败。安装器仅在精确识别该问题并验证实际防火墙后，新建一个返回成功的空 hook，再次确认重载成功；已有文件不会被覆盖，也不修改固件的 fw4 程序。
 
@@ -47,7 +47,7 @@ LuCI 的 **关闭 OpenPass** 会停止管理后台及它启动的 sing-box，撤
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.12 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.13 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
@@ -56,6 +56,7 @@ OPENPASS_VERSION=v0.1.12 sh /tmp/openpass-install.sh
 - 在线、离线、隐藏设备管理，展示内网 IP 和 MAC；在线状态按 DHCP 租约和实时邻居状态更新；支持节点绑定、解除绑定、直连、阻断、设备备注和释放。
 - 释放设备会删除 OpenPass 的设备记录及绑定，并立即清除对应策略；不修改 DHCP 租约或强制设备更换 IP。仍在线的设备会按新设备默认策略重新识别，离线设备不会仅因旧租约立即重建。
 - VLESS、VMess、Trojan、Shadowsocks、SOCKS5 节点导入，批量导入和订阅导入。
+- 独立 L2TP 管理页面，支持连接配置、备注、连接/断开/重连，展示 OpenWrt 实时接口状态；可与普通代理节点一样绑定设备。
 - 订阅支持名称和备注；节点列表按订阅单独展示，可手动刷新、修改名称/备注、删除订阅。点击订阅的“查看节点”只显示该订阅节点，清除筛选可返回全部节点。
 - 删除订阅会同时删除其节点；在线、离线或隐藏设备仍有绑定时必须先解绑。刷新保留连接信息未变节点的 ID 和本地备注，上游移除已绑定节点时拒绝更新，避免设备策略失效。
 - 节点支持备注、URI 链接导出和 JSON 配置导出（导出文件包含节点凭据，请妥善保存）。
@@ -73,6 +74,20 @@ Ping/TCPing 只验证服务器的 ICMP/TCP 连通性，URL 测试才会验证节
 切换直连/代理后，如果浏览器仍使用旧解析结果，可断开并重新连接 Wi-Fi，或清除系统 DNS 缓存。电脑同时连接其他有线/Wi-Fi 网络时，也可能使用另一张网卡的 DNS；验证此路由器的代理和 DNS 时应只保留对应的网络连接。
 
 设备绑定按 MAC 保存，策略按当前 IPv4 地址执行；刷新发现已知设备地址变化后会重载对应策略。建议为绑定代理的设备配置 DHCP 静态租约，减少地址变化到被发现之间的策略空档。启用保护时会阻断 LAN 设备的 IPv6 出口，以防绕过当前 IPv4 策略。
+
+## 纯 L2TP 连接
+
+在管理页面点击 **L2TP**，填写连接名称、服务器 IPv4 地址或域名、用户名、密码及可选备注，默认 MTU 为 1400，可在 1280–1460 之间调整。新连接保存后处于断开状态，点击 **连接** 后才会启用；点击 **重连** 可重新拨号。页面显示连接中、已连接、已断开或错误，以及接口地址、在线时长和错误信息。这里的“已连接”表示 netifd 已建立 PPP 接口，不代表已经验证任意网站可访问。
+
+连接启用后，可在设备管理和设备自助页选中该 L2TP 连接，名称和备注会一起显示。设备通过对应 PPP 接口全局出站，业务流量不进入 sing-box TUN；设备选择的 DoH 仍由 sing-box 处理，但 HTTPS 请求绑定到同一 PPP 接口发送。隧道断开时，绑定设备保留绑定并被阻止回退本地 WAN；如需本地网络，请显式把设备改为直连。删除连接前必须先解绑所有设备，包括离线和隐藏设备。
+
+首次安装 xl2tpd 后，正在运行的 netifd 可能尚未加载 L2TP 协议，页面会提示重启路由器或网络服务。请选择方便短暂断网的时间执行一次重启；后续连接与重连不需要重启整个网络。
+
+连接由 OpenWrt 的 netifd/UCI、xl2tpd 和 pppd 管理，OpenPass 只创建和清理自身拥有的接口与路由，不替换路由器的 WAN 默认路由。关闭或卸载 OpenPass 会撤销这些接口和策略；保留配置时，连接资料仍留在 OpenPass 配置文件中。L2TP 页面会显示缺少的依赖，不会在点击连接时自动后台安装软件。
+
+启用 L2TP 时，路由器上以 root 身份运行的程序使用原生出站，不进入 sing-box TUN，确保 xl2tpd 的外层 UDP 隧道直接连接服务器。LAN 设备仍按各自绑定处理；路由器本机的 53 端口 DNS 请求仍由 OpenPass 单独接管并使用 DoH，不会因为 root 流量排除而放开明文 DNS。
+
+当前支持**纯 L2TP（UDP 1701）**，不包含 L2TP/IPsec、预共享密钥或证书配置；L2TP 本身不提供加密。服务器暂限 IPv4 或可解析为 IPv4 的域名。为兼容 OpenWrt 的 PPP 配置格式，用户名和密码不能包含双引号、反斜杠、换行或控制字符。密码在列表中隐藏，编辑时留空会保留原密码。L2TP 不使用普通节点的 sing-box URL 测试，也没有通用 URI 分享格式；普通节点页面的 URI 和 JSON 批量导出都会跳过 L2TP，显式的单条 L2TP JSON 导出 API 和完整配置备份仍包含连接凭据。
 
 ## 离线安装与迁移
 
@@ -127,7 +142,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.12
+make packages VERSION=0.1.13
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS

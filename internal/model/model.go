@@ -36,6 +36,8 @@ type Node struct {
 	Port             int       `json:"port,omitempty"`
 	UUID             string    `json:"uuid,omitempty"`
 	Password         string    `json:"password,omitempty"`
+	Username         string    `json:"username,omitempty"`
+	MTU              int       `json:"mtu,omitempty"`
 	Method           string    `json:"method,omitempty"`
 	Flow             string    `json:"flow,omitempty"`
 	Network          string    `json:"network,omitempty"`

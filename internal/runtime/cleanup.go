@@ -68,6 +68,9 @@ func (rt *Runtime) CleanupDisabled() error {
 	if err != nil {
 		return err
 	}
+	if err := rt.cleanupL2TPLocked(); err != nil {
+		return err
+	}
 	return rt.clearFirewall()
 }
 
@@ -178,7 +181,7 @@ func cleanupCommands(ruleset []byte) (string, error) {
 	if err := json.Unmarshal(ruleset, &rules); err != nil {
 		return "", fmt.Errorf("decode nftables state: %w", err)
 	}
-	chains := map[string]bool{"openpass_prerouting": true, "openpass_output": true, "openpass_forward": true, "openpass_dns_nat": true, "openpass_dns_output": true}
+	chains := map[string]bool{"openpass_prerouting": true, "openpass_output": true, "openpass_forward": true, "openpass_dns_nat": true, "openpass_dns_output": true, "openpass_l2tp_forward": true, "openpass_l2tp_nat": true}
 	sets := map[string]bool{"proxy_clients": true, "direct_clients": true, "blocked_clients": true}
 	var b bytes.Buffer
 	for _, item := range rules.NFTables {

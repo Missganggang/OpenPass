@@ -22,10 +22,12 @@ jobs:
       - run: node --check web/app.js
       - run: node --check luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js
       - run: node scripts/tests/luci-maintenance.cjs
+      - run: node scripts/tests/l2tp-ui.cjs
       - name: Check shell scripts
         run: for script in install.sh scripts/*.sh openwrt/openpass.init luci-app-openpass/root/usr/libexec/rpcd/openpass; do sh -n "$script"; done
       - run: sh scripts/tests/firewall-reload.sh
       - run: sh scripts/tests/firewall-settings.sh
+      - run: sh scripts/tests/firewall-l2tp.sh
       - run: sh scripts/tests/service-stop.sh
       - run: sh scripts/tests/service-control.sh
       - run: sh scripts/tests/maintenance.sh

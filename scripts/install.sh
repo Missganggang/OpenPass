@@ -43,14 +43,16 @@ if [ -f "$ROOT/usr/bin/openpassd" ]; then
 	INIT="$ROOT/etc/init.d/openpass"
 	NFT="$ROOT/etc/nftables.d/90-openpass.nft"
 	POLICY_INCLUDE="$ROOT/usr/share/nftables.d/ruleset-post/92-openpass-policy.nft"
+	L2TP_INCLUDE="$ROOT/usr/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft"
 else
 	BINARY="$ROOT/dist/openpassd-linux-$arch"
 	WEB="$ROOT/web"
 	INIT="$ROOT/openwrt/openpass.init"
 	NFT="$ROOT/openwrt/90-openpass.nft"
 	POLICY_INCLUDE="$ROOT/openwrt/92-openpass-policy.nft"
+	L2TP_INCLUDE="$ROOT/openwrt/30-openpass-l2tp.nft"
 fi
-for required in "$BINARY" "$WEB/index.html" "$WEB/app.js" "$WEB/styles.css" "$INIT" "$NFT" "$POLICY_INCLUDE" "$ROOT/scripts/firewall-reload.sh" "$ROOT/scripts/firewall-settings.sh" "$ROOT/luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js" "$ROOT/luci-app-openpass/root/usr/libexec/rpcd/openpass" "$ROOT/luci-app-openpass/root/usr/share/rpcd/acl.d/luci-app-openpass.json"; do
+for required in "$BINARY" "$WEB/index.html" "$WEB/app.js" "$WEB/styles.css" "$INIT" "$NFT" "$POLICY_INCLUDE" "$L2TP_INCLUDE" "$ROOT/scripts/firewall-reload.sh" "$ROOT/scripts/firewall-settings.sh" "$ROOT/scripts/firewall-l2tp.sh" "$ROOT/luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js" "$ROOT/luci-app-openpass/root/usr/libexec/rpcd/openpass" "$ROOT/luci-app-openpass/root/usr/share/rpcd/acl.d/luci-app-openpass.json"; do
 	[ -f "$required" ] || fail "Required package file is missing: $required"
 done
 
@@ -75,6 +77,18 @@ if [ -z "$DESTDIR" ]; then
 	[ -f /www/luci-static/resources/luci.js ] || dependencies="$dependencies luci"
 	command -v flock >/dev/null 2>&1 || dependencies="$dependencies flock"
 	command -v setsid >/dev/null 2>&1 || dependencies="$dependencies setsid"
+	# Official xl2tpd depends on ppp-mod-pppol2tp, which in turn pulls in
+	# kmod-pppol2tp and the matching L2TP kernel modules from the firmware feeds.
+	if ! command -v xl2tpd >/dev/null 2>&1 || [ ! -f /lib/netifd/proto/l2tp.sh ]; then
+		dependencies="$dependencies xl2tpd"
+	fi
+	command -v pppd >/dev/null 2>&1 || dependencies="$dependencies ppp"
+	pppol2tp_found=0
+	for plugin in /usr/lib/pppd/*/pppol2tp.so; do
+		[ ! -f "$plugin" ] || pppol2tp_found=1
+	done
+	[ "$pppol2tp_found" = 1 ] || dependencies="$dependencies ppp-mod-pppol2tp"
+	[ -x /usr/libexec/ip-full ] || dependencies="$dependencies ip-full"
 	if [ -n "$dependencies" ]; then
 		echo "Installing dependencies:$dependencies"
 		if command -v opkg >/dev/null 2>&1; then
@@ -99,7 +113,7 @@ if [ -z "$DESTDIR" ]; then
 	esac
 fi
 
-mkdir -p "$PREFIX/bin" "$PREFIX/share/openpass/web" "$PREFIX/share/nftables.d/ruleset-post" "$ETC/openpass" "$ETC/init.d" "$ETC/nftables.d" "$WWW"
+mkdir -p "$PREFIX/bin" "$PREFIX/share/openpass/web" "$PREFIX/share/nftables.d/ruleset-post" "$PREFIX/share/nftables.d/chain-pre/forward" "$ETC/openpass" "$ETC/init.d" "$ETC/nftables.d" "$WWW"
 # A rename on the same filesystem avoids ETXTBSY for a running executable.
 binary_tmp="$PREFIX/bin/.openpassd-install.$$"
 trap 'rm -f "$binary_tmp"' 0
@@ -120,6 +134,8 @@ cp "$NFT" "$ETC/nftables.d/90-openpass.nft"
 chmod 0644 "$ETC/nftables.d/90-openpass.nft"
 cp "$POLICY_INCLUDE" "$PREFIX/share/nftables.d/ruleset-post/92-openpass-policy.nft"
 chmod 0644 "$PREFIX/share/nftables.d/ruleset-post/92-openpass-policy.nft"
+cp "$L2TP_INCLUDE" "$PREFIX/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft"
+chmod 0644 "$PREFIX/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft"
 
 # LuCI needs both the root overlay and the htdocs JavaScript view.
 cp -R "$ROOT/luci-app-openpass/root/." "$DESTDIR/"
@@ -144,6 +160,8 @@ if [ -z "$DESTDIR" ]; then
 		/etc/init.d/openpass disable
 		/etc/init.d/openpass stop || fail "Could not preserve the stopped state; inspect logread -e openpass."
 		printf '%s\n' stopped >/etc/openpass/service-disabled
+		. "$ROOT/scripts/firewall-l2tp.sh"
+		openpass_prepare_l2tp_firewall || fail "Could not register the empty OpenPass L2TP firewall declarations; OpenPass remains stopped."
 		echo "OpenPass remains stopped. Enable it from LuCI when needed."
 	else
 	. "$ROOT/scripts/firewall-settings.sh"

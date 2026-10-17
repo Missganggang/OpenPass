@@ -3,9 +3,11 @@ package singbox
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
+	"openpass/internal/l2tp"
 	"openpass/internal/model"
 )
 
@@ -64,7 +66,15 @@ func Build(st model.State) ([]byte, error) {
 			dnsRules = append(dnsRules, map[string]any{"source_ip_cidr": []string{d.IP + "/32"}, "action": "reject"})
 			continue
 		}
-		if d.Mode == "proxy" && st.Settings.ProxyDNS {
+		l2tpDevice := false
+		for _, node := range st.Nodes {
+			if node.ID == d.NodeID && node.Type == "l2tp" {
+				l2tpDevice = true
+			}
+		}
+		// L2TP client DNS always follows its PPP interface, even if the older
+		// optional proxy-DNS setting is off. There is no WAN fallback.
+		if d.Mode == "proxy" && (st.Settings.ProxyDNS || l2tpDevice) {
 			validNode := false
 			for _, node := range st.Nodes {
 				if node.ID == d.NodeID && node.Enabled && outbound(node) != nil {
@@ -87,6 +97,27 @@ func Build(st model.State) ([]byte, error) {
 		}
 		dnsRules = append(dnsRules, map[string]any{"source_ip_cidr": []string{d.IP + "/32"}, "server": tag})
 	}
+	// sing-box 1.14 can exclude clients by MAC before auto_redirect. Their
+	// packets use kernel policy routing into PPP; only DNS uses the DoH
+	// listener and an interface-bound outbound below.
+	var excludedMACs, excludedInterfaces []string
+	nativeRouterTraffic := false
+	for _, node := range st.Nodes {
+		if node.Type != "l2tp" {
+			continue
+		}
+		if node.Enabled {
+			nativeRouterTraffic = true
+		}
+		excludedInterfaces = append(excludedInterfaces, l2tp.DeviceName(node.ID))
+		for _, d := range st.Devices {
+			if d.Mode == "proxy" && d.NodeID == node.ID {
+				if mac, err := net.ParseMAC(d.MAC); err == nil && len(mac) == 6 {
+					excludedMACs = append(excludedMACs, mac.String())
+				}
+			}
+		}
+	}
 	cfg := map[string]any{
 		"log": map[string]any{"level": "info"},
 		"dns": map[string]any{
@@ -105,6 +136,19 @@ func Build(st model.State) ([]byte, error) {
 		cfg["dns"].(map[string]any)["rules"] = dnsRules
 	}
 	outs := cfg["outbounds"].([]any)
+	tun := cfg["inbounds"].([]any)[0].(map[string]any)
+	if len(excludedMACs) > 0 {
+		tun["exclude_mac_address"] = excludedMACs
+	}
+	if len(excludedInterfaces) > 0 {
+		tun["exclude_interface"] = excludedInterfaces
+	}
+	if nativeRouterTraffic {
+		// xl2tpd runs as root. Exclude native router sockets so its outer UDP
+		// tunnel is never itself captured by the proxy. LAN forwarding is not
+		// affected; our separate output DNS redirect still enforces DoH.
+		tun["exclude_uid"] = []int{0}
+	}
 	rules := cfg["route"].(map[string]any)["rules"].([]any)
 	// LAN DNS packets are redirected by the nftables include to dns-in. The
 	// hijack action makes sing-box resolve them with the selected DoH profile.
@@ -138,6 +182,11 @@ func Build(st model.State) ([]byte, error) {
 			}
 			if !hasOutbound(outs, tag) {
 				tag = "block"
+			}
+			for _, n := range st.Nodes {
+				if n.ID == d.NodeID && n.Type == "l2tp" {
+					tag = "block"
+				}
 			}
 		case "direct":
 			tag = "direct"
@@ -213,6 +262,10 @@ func outbound(n model.Node) map[string]any {
 	t := strings.ToLower(n.Type)
 	o := map[string]any{"tag": n.ID, "server": n.Address, "server_port": n.Port}
 	switch t {
+	case "l2tp":
+		// This outbound is exclusively for DNS. PPP transport, authentication
+		// and client forwarding belong to netifd and the Linux routing stack.
+		return map[string]any{"type": "direct", "tag": n.ID, "bind_interface": l2tp.DeviceName(n.ID)}
 	case "vless":
 		o["type"] = "vless"
 		o["uuid"] = n.UUID
@@ -287,6 +340,9 @@ func outbound(n model.Node) map[string]any {
 // TUN interface or changes routes/firewall rules. All test traffic is confined
 // to an ephemeral loopback HTTP/SOCKS listener and this one node.
 func ProbeConfig(n model.Node, port int, dnsID string, profiles []model.DNS) ([]byte, error) {
+	if n.Type == "l2tp" {
+		return nil, fmt.Errorf("L2TP connections are managed by OpenWrt, not sing-box probes")
+	}
 	n.ID = "probe-node"
 	o := outbound(n)
 	if o == nil {

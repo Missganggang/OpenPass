@@ -57,7 +57,21 @@ printf '%s\n' stopped >/etc/openpass/service-disabled
 command -v nft >/dev/null 2>&1 || fail 'Cannot verify firewall cleanup: nft is unavailable.'
 nft list ruleset >/dev/null 2>&1 || fail 'Cannot inspect the firewall; files were retained.'
 
-	for chain in openpass_prerouting openpass_output openpass_forward openpass_dns_nat openpass_dns_output; do
+	# A regular fw4 forward-chain jump must be removed before its destination
+	# chain can be deleted. Match only our exact comment and use numeric handles
+	# in the fixed fw4/forward chain; never flush another service's rules.
+	if nft list chain inet fw4 openpass_l2tp_forward >/dev/null 2>&1; then
+		command -v jsonfilter >/dev/null 2>&1 || fail 'Cannot inspect L2TP firewall rules: jsonfilter is unavailable.'
+		forward_json=$(nft -j -a list chain inet fw4 forward) || fail 'Cannot inspect the forward chain; files were retained.'
+		# jsonfilter exits 1 for an absent match. An already-removed jump is
+		# safe; deleting the destination below still rejects any live reference.
+		jump_handles=$(printf '%s\n' "$forward_json" | jsonfilter -e '@.nftables[@.rule.comment="openpass-l2tp-forward"].rule.handle' || true)
+		for handle in $jump_handles; do
+			case "$handle" in ""|*[!0-9]*) fail 'Invalid L2TP firewall handle; files were retained.' ;; esac
+			nft delete rule inet fw4 forward handle "$handle" || fail 'Could not remove the L2TP forward rule; files were retained.'
+		done
+	fi
+	for chain in openpass_prerouting openpass_output openpass_forward openpass_dns_nat openpass_dns_output openpass_l2tp_forward openpass_l2tp_nat; do
 		if nft list chain inet fw4 "$chain" >/dev/null 2>&1; then
 			nft delete chain inet fw4 "$chain" || fail 'Could not remove OpenPass firewall chains; files were retained.'
 		fi
@@ -70,6 +84,7 @@ nft list ruleset >/dev/null 2>&1 || fail 'Cannot inspect the firewall; files wer
 
 rm -f /etc/nftables.d/90-openpass.nft /etc/nftables.d/91-openpass-dynamic.nft \
 	/usr/share/nftables.d/ruleset-post/92-openpass-policy.nft \
+	/usr/share/nftables.d/chain-pre/forward/30-openpass-l2tp.nft \
 	/usr/share/luci/menu.d/luci-app-openpass.json \
 	/usr/share/rpcd/acl.d/luci-app-openpass.json \
 	/usr/libexec/rpcd/openpass \
