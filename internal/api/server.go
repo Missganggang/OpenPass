@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,7 +38,7 @@ type Server struct {
 }
 
 func New(s *store.Store) *Server {
-	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.10"}
+	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.11"}
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 
@@ -84,6 +85,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		err = s.devices(w, r, parts[1:])
 	case "nodes":
 		err = s.nodes(w, r, parts[1:])
+	case "subscriptions":
+		err = s.subscriptions(w, r, parts[1:])
 	case "settings":
 		err = s.settings(w, r)
 	case "dns":
@@ -125,6 +128,13 @@ func statusErr(w http.ResponseWriter, e error) {
 		code = he.code
 	} else if errors.Is(e, os.ErrNotExist) {
 		code = http.StatusNotFound
+	}
+	var inUse *store.SubscriptionInUseError
+	if errors.As(e, &inUse) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]any{"error": inUse.Error(), "bound_devices": inUse.Devices})
+		return
 	}
 	http.Error(w, e.Error(), code)
 }
@@ -635,6 +645,7 @@ func (s *Server) importNodes(w http.ResponseWriter, r *http.Request) error {
 		URI     string `json:"uri"`
 		URL     string `json:"url"`
 		Name    string `json:"name"`
+		Remark  string `json:"remark"`
 	}
 	if e := decode(r, &body); e != nil {
 		return e
@@ -644,16 +655,15 @@ func (s *Server) importNodes(w http.ResponseWriter, r *http.Request) error {
 		input = body.URI
 	}
 	if input == "" && body.URL != "" {
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, body.URL, nil)
-		resp, e := http.DefaultClient.Do(req)
+		// Keep the legacy endpoint useful for older frontends. A URL import is
+		// now represented as a named subscription so it can be refreshed and
+		// removed independently from manual nodes.
+		sub, out, e := s.createSubscription(r, body.URL, body.Name, body.Remark)
 		if e != nil {
 			return e
 		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		input = string(b)
+		writeJSON(w, map[string]any{"imported": len(out), "nodes": out, "subscription": publicSubscription(sub, out)})
+		return nil
 	}
 	list, e := nodes.ParseMany(input)
 	if e != nil {
@@ -672,6 +682,229 @@ func (s *Server) importNodes(w http.ResponseWriter, r *http.Request) error {
 	}
 	writeJSON(w, map[string]any{"imported": len(out), "nodes": out})
 	return nil
+}
+
+// subscriptions exposes lifecycle operations for named remote feeds. A
+// subscription owns the nodes parsed from its URL; deleting it removes those
+// nodes after checking that no device is still bound to one of them.
+func (s *Server) subscriptions(w http.ResponseWriter, r *http.Request, parts []string) error {
+	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			writeJSON(w, s.publicSubscriptions())
+			return nil
+		}
+		if r.Method != http.MethodPost {
+			return methodErr()
+		}
+		var body struct {
+			URL    string `json:"url"`
+			Name   string `json:"name"`
+			Remark string `json:"remark"`
+		}
+		if err := decode(r, &body); err != nil {
+			return err
+		}
+		if strings.TrimSpace(body.URL) == "" {
+			return &httpError{http.StatusBadRequest, "订阅地址不能为空"}
+		}
+		if err := validateSubscriptionMetadata(body.Name, body.Remark); err != nil {
+			return err
+		}
+		sub, ns, err := s.createSubscription(r, body.URL, body.Name, body.Remark)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, map[string]any{"subscription": publicSubscription(sub, ns), "imported": len(ns), "nodes": publicNodes(ns)})
+		return nil
+	}
+	id := strings.TrimSpace(parts[0])
+	if len(parts) > 1 {
+		if parts[1] != "refresh" || r.Method != http.MethodPost {
+			return methodErr()
+		}
+		s.discoverMu.Lock()
+		defer s.discoverMu.Unlock()
+		sub, err := s.findSubscription(id)
+		if err != nil {
+			return err
+		}
+		ns, err := s.fetchSubscription(r.Context(), sub.URL)
+		if err != nil {
+			return err
+		}
+		updated, imported, err := s.Store.UpsertSubscription(sub, ns)
+		if err != nil {
+			return err
+		}
+		if s.Runtime != nil {
+			if err := s.Runtime.Apply(s.Store.State()); err != nil {
+				return &httpError{http.StatusInternalServerError, fmt.Sprintf("订阅已刷新，但配置重载失败：%v", err)}
+			}
+		}
+		writeJSON(w, map[string]any{"subscription": publicSubscription(updated, imported), "imported": len(imported), "nodes": publicNodes(imported)})
+		return nil
+	}
+	sub, err := s.findSubscription(id)
+	if err != nil {
+		return err
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, publicSubscription(sub, s.subscriptionNodes(id)))
+		return nil
+	case http.MethodPatch, http.MethodPut:
+		var body map[string]json.RawMessage
+		if err := decode(r, &body); err != nil {
+			return err
+		}
+		updated, err := s.Store.UpdateSubscription(id, func(x *model.Subscription) error {
+			if raw, ok := body["name"]; ok && string(raw) != "null" {
+				if err := json.Unmarshal(raw, &x.Name); err != nil {
+					return err
+				}
+			}
+			if raw, ok := body["remark"]; ok && string(raw) != "null" {
+				if err := json.Unmarshal(raw, &x.Remark); err != nil {
+					return err
+				}
+			}
+			if raw, ok := body["enabled"]; ok && string(raw) != "null" {
+				if err := json.Unmarshal(raw, &x.Enabled); err != nil {
+					return err
+				}
+			}
+			if strings.TrimSpace(x.Name) == "" {
+				x.Name = x.URL
+			}
+			if err := validateSubscriptionMetadata(x.Name, x.Remark); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		writeJSON(w, publicSubscription(updated, s.subscriptionNodes(id)))
+		return nil
+	case http.MethodDelete:
+		s.discoverMu.Lock()
+		defer s.discoverMu.Unlock()
+		if err := s.Store.DeleteSubscription(id); err != nil {
+			return err
+		}
+		if s.Runtime != nil {
+			if err := s.Runtime.Apply(s.Store.State()); err != nil {
+				return &httpError{http.StatusInternalServerError, fmt.Sprintf("订阅已删除，但配置重载失败：%v", err)}
+			}
+		}
+		writeJSON(w, map[string]any{"deleted": true, "id": id})
+		return nil
+	default:
+		return methodErr()
+	}
+}
+
+func (s *Server) createSubscription(r *http.Request, rawURL, name, remark string) (model.Subscription, []model.Node, error) {
+	s.discoverMu.Lock()
+	defer s.discoverMu.Unlock()
+	rawURL = strings.TrimSpace(rawURL)
+	if err := validateSubscriptionMetadata(name, remark); err != nil {
+		return model.Subscription{}, nil, err
+	}
+	for _, existing := range s.Store.Subscriptions() {
+		if existing.URL == rawURL {
+			if strings.TrimSpace(name) != "" {
+				existing.Name = strings.TrimSpace(name)
+			}
+			if strings.TrimSpace(remark) != "" {
+				existing.Remark = strings.TrimSpace(remark)
+			}
+			ns, err := s.fetchSubscription(r.Context(), rawURL)
+			if err != nil {
+				return model.Subscription{}, nil, err
+			}
+			return s.Store.UpsertSubscription(existing, ns)
+		}
+	}
+	ns, err := s.fetchSubscription(r.Context(), rawURL)
+	if err != nil {
+		return model.Subscription{}, nil, err
+	}
+	sub := model.Subscription{ID: store.ID("sub"), URL: rawURL, Name: strings.TrimSpace(name), Remark: strings.TrimSpace(remark)}
+	return s.Store.UpsertSubscription(sub, ns)
+}
+
+func (s *Server) fetchSubscription(ctx context.Context, rawURL string) ([]model.Node, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, &httpError{http.StatusBadRequest, "订阅地址必须是有效的 HTTP 或 HTTPS 地址"}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("订阅请求失败：HTTP %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	return nodes.ParseMany(string(b))
+}
+
+func validateSubscriptionMetadata(name, remark string) error {
+	if utf8.RuneCountInString(strings.TrimSpace(name)) > 100 {
+		return &httpError{http.StatusBadRequest, "订阅名称最多 100 个字符"}
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(remark)) > 200 {
+		return &httpError{http.StatusBadRequest, "订阅备注最多 200 个字符"}
+	}
+	return nil
+}
+
+func (s *Server) findSubscription(id string) (model.Subscription, error) {
+	for _, sub := range s.Store.Subscriptions() {
+		if sub.ID == id {
+			return sub, nil
+		}
+	}
+	return model.Subscription{}, &httpError{http.StatusNotFound, "subscription not found"}
+}
+
+func (s *Server) subscriptionNodes(id string) []model.Node {
+	var out []model.Node
+	for _, n := range s.Store.Nodes() {
+		if n.Subscription == id {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func (s *Server) publicSubscriptions() []map[string]any {
+	subs := s.Store.Subscriptions()
+	out := make([]map[string]any, 0, len(subs))
+	for _, sub := range subs {
+		out = append(out, publicSubscription(sub, s.subscriptionNodes(sub.ID)))
+	}
+	return out
+}
+
+func publicSubscription(sub model.Subscription, ns []model.Node) map[string]any {
+	return map[string]any{
+		"id": sub.ID, "name": sub.Name, "remark": sub.Remark, "url": sub.URL,
+		"enabled": sub.Enabled, "last_sync_at": sub.LastSyncAt, "last_error": sub.LastError,
+		"created_at": sub.CreatedAt, "updated_at": sub.UpdatedAt,
+		"node_count": len(ns), "nodes": publicNodes(ns),
+	}
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
@@ -710,7 +943,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 func publicNodes(in []model.Node) []map[string]any {
 	out := make([]map[string]any, 0, len(in))
 	for _, n := range in {
-		out = append(out, map[string]any{"id": n.ID, "name": n.Name, "remark": n.Remark, "type": n.Type, "address": n.Address, "port": n.Port, "enabled": n.Enabled})
+		out = append(out, map[string]any{"id": n.ID, "name": n.Name, "remark": n.Remark, "type": n.Type, "address": n.Address, "port": n.Port, "enabled": n.Enabled, "subscription_id": n.Subscription})
 	}
 	return out
 }

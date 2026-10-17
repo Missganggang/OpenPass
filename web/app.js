@@ -6,7 +6,7 @@
   const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
   const state = {
     page: 'dashboard', deviceTab: 'online', nodeFilter: 'all',
-    devices: [], allDevices: [], nodes: [], settings: {}, dns: [], status: {},
+    devices: [], allDevices: [], nodes: [], subscriptions: [], nodeSubscriptionFilter: 'all', settings: {}, dns: [], status: {},
     standalone: /^\/(choose|self)\/?$/.test(location.pathname),
     self: null, selfMode: null, selfLoading: false, pendingProxy: new Set(), deletingNodes: new Set(),
     demo: false
@@ -94,6 +94,16 @@
   function responseList(payload, key) { const list = Array.isArray(payload) ? payload : payload?.[key]; return Array.isArray(list) ? list.filter(item => item && typeof item === 'object') : []; }
   function findNode(id) { return state.nodes.find(n => String(n.id) === String(id)); }
   function nodeLabel(node) { return [node?.name || node?.address || node?.type || '代理节点', node?.remark].filter(Boolean).join(' · '); }
+  function nodeSubscriptionID(node) {
+    if (!node) return '';
+    if (node.subscription_id != null) return String(node.subscription_id);
+    if (node.subscription && typeof node.subscription === 'object') return String(node.subscription.id || '');
+    return '';
+  }
+  function subscriptionName(id) {
+    const subscription = state.subscriptions.find(item => String(item.id) === String(id));
+    return subscription?.name || subscription?.remark || '订阅节点';
+  }
   function nodeName(id) { return findNode(id)?.name || (id ? '节点已删除' : '未绑定节点'); }
   function dnsName(id) { return state.dns.find(d => String(d.id) === String(id))?.name || id || '默认 DoH'; }
   function timeText(value) { if (!value) return '—'; if (typeof value === 'string') return value; try { return new Date(value).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' }); } catch (_) { return '—'; } }
@@ -110,9 +120,11 @@
 
   async function loadData(throwOnError = false) {
     try {
-      const [devices, allDevices, nodes, settings, dns, status] = await Promise.all([api('/devices'), api('/devices?hidden=all').catch(() => null), api('/nodes'), api('/settings'), api('/dns').catch(() => demoDns), api('/status')]);
+      const [devices, allDevices, nodes, settings, dns, status, subscriptions] = await Promise.all([api('/devices'), api('/devices?hidden=all').catch(() => null), api('/nodes'), api('/settings'), api('/dns').catch(() => demoDns), api('/status'), api('/subscriptions').catch(() => [])]);
       state.devices = responseList(devices, 'devices'); const everyDevice = allDevices ? responseList(allDevices, 'devices') : state.devices;
       state.nodes = responseList(nodes, 'nodes').map(n => ({ ...n, test_results: findNode(n.id)?.test_results })); state.settings = settings || {}; state.dns = Array.isArray(dns) ? responseList(dns) : demoDns;
+      state.subscriptions = responseList(subscriptions, 'subscriptions');
+      if (state.nodeSubscriptionFilter !== 'all' && !state.subscriptions.some(item => String(item.id) === String(state.nodeSubscriptionFilter))) state.nodeSubscriptionFilter = 'all';
       state.allDevices = everyDevice;
       state.status = status || {};
       if (state.settings.enabled != null) state.status.enabled = state.settings.enabled;
@@ -194,13 +206,13 @@
     const title = { dashboard: '仪表盘', devices: '设备管理', nodes: '节点列表', dns: 'DNS 防泄露', settings: '设置', 'self-service': '设备自助页' }[page] || '仪表盘';
     $('#pageTitle').textContent = title;
     $('#sidebar')?.classList.remove('open');
-    if (page === 'devices') renderDevices(); if (page === 'nodes') renderNodes();
+    if (page === 'devices') renderDevices(); if (page === 'nodes') { renderSubscriptions(); renderNodes(); }
     if (page === 'self-service' && !state.standalone) loadSelf();
   }
 
-  function renderAll() { renderStatus(); renderDashboard(); renderDevices(); renderNodes(); renderSettings(); renderDns(); navigate(state.page); }
+  function renderAll() { renderStatus(); renderDashboard(); renderDevices(); renderSubscriptions(); renderNodes(); renderSettings(); renderDns(); navigate(state.page); }
   function renderStatus() {
-    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.10').replace(/^v/, '')}`;
+    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.11').replace(/^v/, '')}`;
     const online = state.allDevices.filter(d => d.online && !d.hidden).length; const proxied = state.allDevices.filter(d => d.mode === 'proxy' && !d.hidden).length; const healthy = state.nodes.filter(n => nodeURLResult(n) === true && n.enabled !== false).length;
     $('#metricOnline').textContent = online; $('#metricProxied').textContent = proxied; $('#metricNodes').textContent = healthy; $('#onlineBadge').textContent = online; $('#nodesBadge').textContent = state.nodes.length; $('#onlineCount').textContent = online; $('#offlineCount').textContent = state.allDevices.filter(d => !d.online && !d.hidden).length; $('#hiddenCount').textContent = state.allDevices.filter(d => d.hidden).length; $('#hiddenTabCount').textContent = state.allDevices.filter(d => d.hidden).length;
     $('#metricDns').textContent = state.settings.default_dns ? dnsName(state.settings.default_dns) : 'DoH 安全'; $('#metricDnsSub').textContent = state.settings.force_doh === false ? '加密解析未强制' : 'DoH 加密解析'; $('#kernelVersion').textContent = state.status.kernel || state.status.version || 'sing-box 运行中'; $('#routerAddress').textContent = state.status.router || 'OpenWrt · 10.0.0.1';
@@ -240,10 +252,28 @@
       return `<div class="test-detail ${result.ok ? 'test-pass' : 'test-fail'}"><b>${testLabels[type]} · ${result.ok ? '通过' : '失败'}</b>${result.ok ? ` · ${esc(result.latency_ms ?? '—')} ms` : ''}${result.status ? ` · HTTP ${esc(result.status)}` : ''}${details ? `<small>${esc(details)}</small>` : ''}</div>`;
     }).join('');
   }
+  function renderSubscriptions() {
+    const body = $('#subscriptionsList');
+    if (!body) return;
+    const countLabel = $('#subscriptionCount');
+    if (countLabel) countLabel.textContent = `${state.subscriptions.length} 个订阅`;
+    if (!state.subscriptions.length) {
+      body.innerHTML = '<div class="subscription-empty">暂无订阅地址。点击“导入节点”，选择“订阅地址”即可添加。</div>';
+      return;
+    }
+    body.innerHTML = state.subscriptions.map(subscription => {
+      const id = String(subscription.id || '');
+      const count = state.nodes.filter(node => nodeSubscriptionID(node) === id || (node.subscription_name && String(node.subscription_name) === String(subscription.name))).length || Number(subscription.node_count || 0);
+      const selected = state.nodeSubscriptionFilter === id;
+      const sync = subscription.last_sync_at ? `上次更新 ${timeText(subscription.last_sync_at)}` : subscription.last_error ? `更新失败：${subscription.last_error}` : '尚未同步';
+      return `<article class="subscription-card ${selected ? 'selected' : ''}" data-subscription-id="${esc(id)}"><div class="subscription-card-main"><span class="subscription-icon">↻</span><div><b>${esc(subscription.name || '未命名订阅')}</b>${subscription.remark ? `<small>备注：${esc(subscription.remark)}</small>` : ''}<small class="subscription-meta">${esc(sync)} · ${count} 个节点</small></div></div><div class="subscription-card-actions"><button class="row-action text-action" data-action="select-subscription" data-id="${esc(id)}">${selected ? '正在查看' : '查看节点'}</button><button class="row-action" data-action="refresh-subscription" data-id="${esc(id)}" title="立即刷新订阅">↻</button><button class="row-action" data-action="edit-subscription" data-id="${esc(id)}" title="编辑订阅备注">备注</button><button class="row-action danger" data-action="delete-subscription" data-id="${esc(id)}" title="删除订阅">×</button></div></article>`;
+    }).join('');
+  }
   function renderNodes() {
     ensureNodeTestControls();
     const query = ($('#nodeSearch')?.value || '').toLowerCase();
-    let rows = state.nodes.filter(n => [n.name, n.remark, n.type, n.address].some(value => String(value || '').toLowerCase().includes(query)));
+    let rows = state.nodes.filter(n => [n.name, n.remark, n.type, n.address, n.subscription_name, nodeSubscriptionID(n) ? subscriptionName(nodeSubscriptionID(n)) : ''].some(value => String(value || '').toLowerCase().includes(query)));
+    if (state.nodeSubscriptionFilter !== 'all') rows = rows.filter(node => nodeSubscriptionID(node) === String(state.nodeSubscriptionFilter) || String(node.subscription_name || '') === subscriptionName(state.nodeSubscriptionFilter));
     if (state.nodeFilter === 'healthy') rows = rows.filter(n => nodeURLResult(n) === true);
     if (state.nodeFilter === 'unhealthy') rows = rows.filter(n => nodeURLResult(n) === false);
     $('#nodeAvailable').textContent = state.nodes.filter(n => nodeURLResult(n) === true).length;
@@ -251,14 +281,18 @@
     $('#nodeUnavailable').textContent = state.nodes.filter(n => nodeURLResult(n) === false).length;
     const body = $('#nodesTable');
     if (!body) return;
-    if (!rows.length) { body.innerHTML = '<tr><td colspan="6" class="empty-state">暂无符合条件的节点</td></tr>'; return; }
+    const activeSubscription = state.nodeSubscriptionFilter === 'all' ? '' : subscriptionName(state.nodeSubscriptionFilter);
+    const clear = $('#nodeSubscriptionClear');
+    if (clear) { clear.classList.toggle('hidden', !activeSubscription); clear.textContent = activeSubscription ? `仅显示：${activeSubscription} ×` : ''; }
+    if (!rows.length) { body.innerHTML = `<tr><td colspan="6" class="empty-state">${activeSubscription ? `“${esc(activeSubscription)}”暂无节点` : '暂无符合条件的节点'}</td></tr>`; return; }
     body.innerHTML = rows.map(node => {
       const urlOK = nodeURLResult(node);
       const result = node.test_results?.url;
       const label = node.testing ? `${testLabels[node.testing]} 检测中` : urlOK === true ? 'URL 通过' : urlOK === false ? 'URL 失败' : '待 URL 测试';
       const statusClass = urlOK === false ? 'bad' : urlOK === true ? '' : 'off';
       const actions = ['ping', 'tcp', 'url'].map(type => `<button class="row-action test-action" data-action="test-node" data-test-type="${type}" data-id="${esc(node.id)}" title="${testLabels[type]} 测试" ${node.testing ? 'disabled' : ''}>${testLabels[type]}</button>`).join('');
-      return `<tr><td><div class="device-cell"><span class="device-avatar">◈</span><span class="device-name">${esc(node.name || node.address)}${node.remark ? `<small class="node-remark">备注：${esc(node.remark)}</small>` : ''}<small>${esc(node.address || '')}:${esc(node.port || '')}</small></span></div></td><td><span class="protocol-badge ${esc(node.type || '')}">${esc(node.type || 'unknown')}</span></td><td><span class="latency">${result?.ok ? `${esc(result.latency_ms)} ms` : '—'}</span><small class="test-caption">代理 URL 延迟</small></td><td><span class="status-label ${statusClass}"><i></i>${label}</span><div class="node-test-results">${nodeTestSummary(node)}</div></td><td class="muted">${esc(node.last_test ? timeText(node.last_test) : '—')}</td><td class="align-right"><span class="row-actions"><button class="row-action" data-action="remark-node" data-id="${esc(node.id)}" title="编辑备注">备注</button><button class="row-action node-share" data-action="copy-node" data-id="${esc(node.id)}" title="复制节点链接">复制</button><button class="row-action node-share" data-action="export-node" data-id="${esc(node.id)}" title="导出节点链接">导出</button>${actions}<button class="row-action danger" data-action="delete-node" data-id="${esc(node.id)}" title="删除节点" ${state.deletingNodes.has(String(node.id)) ? 'disabled' : ''}>×</button></span></td></tr>`;
+      const subLabel = nodeSubscriptionID(node) ? subscriptionName(nodeSubscriptionID(node)) : '';
+      return `<tr><td><div class="device-cell"><span class="device-avatar">◈</span><span class="device-name">${esc(node.name || node.address)}${node.remark ? `<small class="node-remark">备注：${esc(node.remark)}</small>` : ''}${subLabel ? `<small class="node-remark subscription-node-label">订阅：${esc(subLabel)}</small>` : ''}<small>${esc(node.address || '')}:${esc(node.port || '')}</small></span></div></td><td><span class="protocol-badge ${esc(node.type || '')}">${esc(node.type || 'unknown')}</span></td><td><span class="latency">${result?.ok ? `${esc(result.latency_ms)} ms` : '—'}</span><small class="test-caption">代理 URL 延迟</small></td><td><span class="status-label ${statusClass}"><i></i>${label}</span><div class="node-test-results">${nodeTestSummary(node)}</div></td><td class="muted">${esc(node.last_test ? timeText(node.last_test) : '—')}</td><td class="align-right"><span class="row-actions"><button class="row-action" data-action="remark-node" data-id="${esc(node.id)}" title="编辑备注">备注</button><button class="row-action node-share" data-action="copy-node" data-id="${esc(node.id)}" title="复制节点链接">复制</button><button class="row-action node-share" data-action="export-node" data-id="${esc(node.id)}" title="导出节点链接">导出</button>${actions}<button class="row-action danger" data-action="delete-node" data-id="${esc(node.id)}" title="删除节点" ${state.deletingNodes.has(String(node.id)) ? 'disabled' : ''}>×</button></span></td></tr>`;
     }).join('');
   }
   function ensureNodeTestControls() {
@@ -396,10 +430,13 @@
     const subscription = !$('#importSubscriptionPane').classList.contains('hidden');
     const content = subscription ? '' : $('#nodeImportText').value.trim();
     const url = subscription ? $('#subscriptionUrl').value.trim() : '';
+    const name = subscription ? $('#subscriptionName').value.trim() : '';
+    const remark = subscription ? $('#subscriptionRemark').value.trim() : '';
     if (!content && !url) { toast('请粘贴节点内容或订阅地址', 'error'); return; }
+    if (subscription && !name) { toast('请填写订阅名称，方便在节点列表中区分', 'error'); $('#subscriptionName').focus(); return; }
     let imported = null;
     try {
-      const result = state.demo ? { imported: content.split(/\r?\n/).filter(Boolean).length || 3 } : await api('/nodes/import', { method: 'POST', body: { content, url } });
+      const result = state.demo ? { imported: content.split(/\r?\n/).filter(Boolean).length || 3 } : subscription ? await api('/subscriptions', { method: 'POST', body: { url, name, remark } }) : await api('/nodes/import', { method: 'POST', body: { content, url } });
       imported = result?.imported ?? responseList(result, 'nodes').length;
       closeModal();
       if (!state.demo) {
@@ -412,6 +449,58 @@
     } catch (error) {
       if (!state.demo) { try { await loadData(true); } catch (_) { /* Keep the original import/apply error. */ } }
       toast(`${imported === null ? '导入失败' : `已导入 ${imported} 个节点，但应用或刷新失败`}：${error.message}`, 'error');
+    }
+  }
+
+  function subscriptionByID(id) { return state.subscriptions.find(item => String(item.id) === String(id)); }
+  async function selectSubscription(id) {
+    state.nodeSubscriptionFilter = state.nodeSubscriptionFilter === String(id) ? 'all' : String(id);
+    renderSubscriptions(); renderNodes();
+  }
+  async function refreshSubscription(id) {
+    const subscription = subscriptionByID(id);
+    if (!subscription) return;
+    try {
+      const result = state.demo ? { imported: 0 } : await api(`/subscriptions/${encodeURIComponent(id)}/refresh`, { method: 'POST' });
+      await loadData(true);
+      toast(`订阅“${subscription.name || '未命名订阅'}”已刷新${result?.imported != null ? `，同步 ${result.imported} 个节点` : ''}`);
+    } catch (error) {
+      if (error.status === 409 && error.data?.bound_devices) {
+        await showActionDialog({ title: '订阅包含已绑定节点', message: `${error.message}\n请先解绑这些设备，再刷新订阅。`, submitText: '知道了' });
+      } else toast(`刷新订阅失败：${error.message}`, 'error');
+    }
+  }
+  async function editSubscription(id) {
+    const subscription = subscriptionByID(id);
+    if (!subscription) return;
+    const name = await showActionDialog({ title: '编辑订阅名称', message: '名称会显示在订阅列表和节点筛选中。', label: '订阅名称', value: subscription.name || '', submitText: '下一步', maxLength: 100 });
+    if (name === null) return;
+    if (!name.trim()) { toast('订阅名称不能为空', 'error'); return; }
+    const remark = await showActionDialog({ title: '编辑订阅备注', message: '备注用于记录来源、地区或用途；留空可清除。', label: '订阅备注', value: subscription.remark || '', submitText: '保存', maxLength: 200 });
+    if (remark === null) return;
+    try {
+      if (!state.demo) await api(`/subscriptions/${encodeURIComponent(id)}`, { method: 'PATCH', body: { name: name.trim(), remark: remark.trim() } });
+      Object.assign(subscription, { name: name.trim(), remark: remark.trim() });
+      renderSubscriptions(); renderNodes();
+      toast('订阅信息已保存');
+    } catch (error) { toast(`保存订阅信息失败：${error.message}`, 'error'); }
+  }
+  async function deleteSubscription(id) {
+    const subscription = subscriptionByID(id);
+    if (!subscription) return;
+    const confirmed = await showActionDialog({ title: '删除订阅', message: `删除“${subscription.name || '未命名订阅'}”后，会同时删除该订阅导入的节点。已绑定设备必须先解绑，否则删除会被拒绝。`, submitText: '确认删除', danger: true });
+    if (!confirmed) return;
+    try {
+      if (!state.demo) await api(`/subscriptions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      state.subscriptions = state.subscriptions.filter(item => String(item.id) !== String(id));
+      state.nodes = state.nodes.filter(node => nodeSubscriptionID(node) !== String(id));
+      if (state.nodeSubscriptionFilter === String(id)) state.nodeSubscriptionFilter = 'all';
+      renderSubscriptions(); renderNodes();
+      if (!state.demo) await loadData(true);
+      toast(`订阅“${subscription.name || '未命名订阅'}”已删除`);
+    } catch (error) {
+      if (error.status === 409) await showActionDialog({ title: '订阅仍被设备使用', message: `${error.message}\n请先在设备管理中解绑这些设备，再删除订阅。`, submitText: '知道了' });
+      else toast(`删除订阅失败：${error.message}`, 'error');
     }
   }
 
@@ -485,13 +574,15 @@
   }
 
   function openModal() { $('#modalBackdrop').classList.remove('hidden'); $('#nodeImportText').focus(); }
-  function closeModal() { $('#modalBackdrop').classList.add('hidden'); }
+  function closeModal() { $('#modalBackdrop').classList.add('hidden'); $('#subscriptionUrl').value = ''; $('#subscriptionName').value = ''; $('#subscriptionRemark').value = ''; }
   function setupEvents() {
     window.addEventListener('hashchange', () => navigate(location.hash.slice(1) || 'dashboard'));
     $$('.nav-item').forEach(el => el.addEventListener('click', e => { e.preventDefault(); navigate(el.dataset.page); }));
     $$('[data-goto]').forEach(el => el.addEventListener('click', () => navigate(el.dataset.goto)));
     $('#menuBtn')?.addEventListener('click', () => $('#sidebar').classList.toggle('open')); $('#refreshBtn')?.addEventListener('click', () => loadData()); $('#discoverBtn')?.addEventListener('click', refreshDevices); $('#importNodeBtn')?.addEventListener('click', openModal); $('#exportNodesBtn')?.addEventListener('click', () => exportNodes('uri')); $('#exportNodesJsonBtn')?.addEventListener('click', () => exportNodes('json')); $('#modalClose')?.addEventListener('click', closeModal); $('#modalCancel')?.addEventListener('click', closeModal); $('#modalBackdrop')?.addEventListener('click', e => { if (e.target.id === 'modalBackdrop') closeModal(); }); $('#importSubmit')?.addEventListener('click', importNodes);
-    $$('.import-tab').forEach(tab => tab.addEventListener('click', () => { $$('.import-tab').forEach(t => t.classList.toggle('active', t === tab)); $('#importTextPane').classList.toggle('hidden', tab.dataset.importTab !== 'text'); $('#importSubscriptionPane').classList.toggle('hidden', tab.dataset.importTab !== 'subscription'); }));
+    $$('.import-tab').forEach(tab => tab.addEventListener('click', () => { $$('.import-tab').forEach(t => t.classList.toggle('active', t === tab)); $('#importTextPane').classList.toggle('hidden', tab.dataset.importTab !== 'text'); $('#importSubscriptionPane').classList.toggle('hidden', tab.dataset.importTab !== 'subscription'); if (tab.dataset.importTab === 'subscription') $('#subscriptionName').focus(); }));
+    $('#subscriptionsList')?.addEventListener('click', e => { const el = e.target.closest('[data-action]'); if (!el) return; const id = el.dataset.id; if (el.dataset.action === 'select-subscription') selectSubscription(id); if (el.dataset.action === 'refresh-subscription') refreshSubscription(id); if (el.dataset.action === 'edit-subscription') editSubscription(id); if (el.dataset.action === 'delete-subscription') deleteSubscription(id); });
+    $('#nodeSubscriptionClear')?.addEventListener('click', () => { state.nodeSubscriptionFilter = 'all'; renderSubscriptions(); renderNodes(); });
     $$('[data-device-tab]').forEach(tab => tab.addEventListener('click', () => { $$('[data-device-tab]').forEach(t => t.classList.toggle('active', t === tab)); state.deviceTab = tab.dataset.deviceTab; renderDevices(); })); $('#deviceSearch')?.addEventListener('input', renderDevices); $('#showHiddenBtn')?.addEventListener('click', () => { state.deviceTab = 'hidden'; $$('[data-device-tab]').forEach(t => t.classList.toggle('active', t.dataset.deviceTab === 'hidden')); renderDevices(); });
     $('#devicesTable')?.addEventListener('change', e => {
       const el = e.target; const id = el.dataset.id; if (!id) return;

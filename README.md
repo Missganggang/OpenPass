@@ -43,7 +43,7 @@ LuCI 的 **关闭 OpenPass** 会停止管理后台及它启动的 sing-box，撤
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.10 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.11 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
@@ -52,6 +52,8 @@ OPENPASS_VERSION=v0.1.10 sh /tmp/openpass-install.sh
 - 在线、离线、隐藏设备管理，展示内网 IP 和 MAC；在线状态按 DHCP 租约和实时邻居状态更新；支持节点绑定、解除绑定、直连、阻断、设备备注和释放。
 - 释放设备会删除 OpenPass 的设备记录及绑定，并立即清除对应策略；不修改 DHCP 租约或强制设备更换 IP。仍在线的设备会按新设备默认策略重新识别，离线设备不会仅因旧租约立即重建。
 - VLESS、VMess、Trojan、Shadowsocks、SOCKS5 节点导入，批量导入和订阅导入。
+- 订阅支持名称和备注；节点列表按订阅单独展示，可手动刷新、修改名称/备注、删除订阅。点击订阅的“查看节点”只显示该订阅节点，清除筛选可返回全部节点。
+- 删除订阅会同时删除其节点；在线、离线或隐藏设备仍有绑定时必须先解绑。刷新保留连接信息未变节点的 ID 和本地备注，上游移除已绑定节点时拒绝更新，避免设备策略失效。
 - 节点支持备注、URI 链接导出和 JSON 配置导出（导出文件包含节点凭据，请妥善保存）。
 - 删除节点前检查全部设备绑定，包括离线和隐藏设备；仍有绑定时列出设备并提示先解绑，无绑定时直接删除。清空节点列表后设备管理仍可正常使用。
 - Ping、TCPing、通过节点执行 URL 测试；国内/海外测试地址可修改。
@@ -121,7 +123,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.10
+make packages VERSION=0.1.11
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS

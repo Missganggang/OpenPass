@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Device is a LAN client known to OpenPass.
 type Device struct {
@@ -21,6 +24,9 @@ type Device struct {
 type Node struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Subscription links nodes imported from a named remote feed. Empty means
+	// the node was imported or created independently.
+	Subscription string `json:"subscription_id,omitempty"`
 	// Remark is an operator supplied note (for example, the provider or
 	// intended location). It is kept separately from Name so imports can keep
 	// their display label while administrators annotate a node.
@@ -41,13 +47,46 @@ type Node struct {
 	Path             string    `json:"path,omitempty"`
 	TLS              bool      `json:"tls,omitempty"`
 	URI              string    `json:"uri,omitempty"`
-	Subscription     string    `json:"subscription,omitempty"`
 	Enabled          bool      `json:"enabled"`
 	Latency          int       `json:"latency,omitempty"`
 	TCPReachable     *bool     `json:"tcp_reachable,omitempty"`
 	URLReachable     *bool     `json:"url_reachable,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// UnmarshalJSON accepts the pre-subscription state key as well. Early
+// development builds used "subscription" while the public API now exposes
+// the clearer "subscription_id" name; normal writes always use the latter.
+func (n *Node) UnmarshalJSON(data []byte) error {
+	type nodeAlias Node
+	var aux struct {
+		*nodeAlias
+		LegacySubscription string `json:"subscription"`
+	}
+	aux.nodeAlias = (*nodeAlias)(n)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if n.Subscription == "" {
+		n.Subscription = aux.LegacySubscription
+	}
+	return nil
+}
+
+// Subscription is a named remote node feed. Nodes imported from the feed keep
+// the subscription ID in Node.Subscription so a refresh or removal can update
+// only that feed's nodes without affecting manually imported nodes.
+type Subscription struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Remark     string    `json:"remark,omitempty"`
+	URL        string    `json:"url"`
+	Enabled    bool      `json:"enabled"`
+	LastSyncAt time.Time `json:"last_sync_at,omitempty"`
+	LastError  string    `json:"last_error,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type DNS struct {
@@ -75,10 +114,11 @@ type Settings struct {
 }
 
 type State struct {
-	Devices  []Device `json:"devices"`
-	Nodes    []Node   `json:"nodes"`
-	Settings Settings `json:"settings"`
-	DNS      []DNS    `json:"dns"`
+	Devices       []Device       `json:"devices"`
+	Nodes         []Node         `json:"nodes"`
+	Subscriptions []Subscription `json:"subscriptions"`
+	Settings      Settings       `json:"settings"`
+	DNS           []DNS          `json:"dns"`
 }
 
 func DefaultDNS() []DNS {

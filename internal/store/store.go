@@ -32,7 +32,7 @@ func New(path string) (*Store, error) {
 func (s *Store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data = model.State{Settings: model.DefaultSettings(), DNS: model.DefaultDNS(), Devices: []model.Device{}, Nodes: []model.Node{}}
+	s.data = model.State{Settings: model.DefaultSettings(), DNS: model.DefaultDNS(), Devices: []model.Device{}, Nodes: []model.Node{}, Subscriptions: []model.Subscription{}}
 	b, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -65,6 +65,9 @@ func (s *Store) load() error {
 	}
 	if s.data.Nodes == nil {
 		s.data.Nodes = []model.Node{}
+	}
+	if s.data.Subscriptions == nil {
+		s.data.Subscriptions = []model.Subscription{}
 	}
 	return nil
 }
@@ -110,6 +113,7 @@ func (s *Store) State() model.State {
 	out := s.data
 	out.Devices = append([]model.Device(nil), s.data.Devices...)
 	out.Nodes = append([]model.Node(nil), s.data.Nodes...)
+	out.Subscriptions = append([]model.Subscription(nil), s.data.Subscriptions...)
 	out.DNS = append([]model.DNS(nil), s.data.DNS...)
 	return out
 }
@@ -122,6 +126,11 @@ func (s *Store) Nodes() []model.Node {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]model.Node{}, s.data.Nodes...)
+}
+func (s *Store) Subscriptions() []model.Subscription {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]model.Subscription{}, s.data.Subscriptions...)
 }
 func (s *Store) Settings() model.Settings { s.mu.RLock(); defer s.mu.RUnlock(); return s.data.Settings }
 func (s *Store) DNS() []model.DNS {
@@ -302,6 +311,233 @@ func (s *Store) UpdateNode(id string, fn func(*model.Node) error) (model.Node, e
 		return s.data.Nodes[i], nil
 	}
 	return model.Node{}, os.ErrNotExist
+}
+
+// SubscriptionInUseError prevents a subscription refresh/removal from
+// silently orphaning devices whose proxy policy points at one of its nodes.
+// It intentionally embeds the concrete devices so the API can show the user
+// exactly which clients must be unbound first.
+type SubscriptionInUseError struct{ Devices []model.Device }
+
+func (e *SubscriptionInUseError) Error() string {
+	return fmt.Sprintf("该订阅仍有 %d 台设备绑定节点，请先解绑设备后再操作", len(e.Devices))
+}
+
+// UpsertSubscription stores a subscription and atomically replaces its
+// imported nodes. Existing node IDs are retained when their connection fields
+// are unchanged so device bindings survive a refresh. Nodes removed upstream
+// are rejected while still referenced by a device.
+func (s *Store) UpsertSubscription(sub model.Subscription, incoming []model.Node) (model.Subscription, []model.Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.data
+	previous.Devices = append([]model.Device(nil), s.data.Devices...)
+	previous.Nodes = append([]model.Node(nil), s.data.Nodes...)
+	previous.Subscriptions = append([]model.Subscription(nil), s.data.Subscriptions...)
+
+	now := time.Now()
+	if sub.ID == "" {
+		sub.ID = ID("sub")
+	}
+	if sub.Name == "" {
+		sub.Name = sub.URL
+	}
+	if sub.CreatedAt.IsZero() {
+		sub.CreatedAt = now
+	}
+	for i := range s.data.Subscriptions {
+		if s.data.Subscriptions[i].ID == sub.ID {
+			sub.CreatedAt = s.data.Subscriptions[i].CreatedAt
+			if sub.URL == "" {
+				sub.URL = s.data.Subscriptions[i].URL
+			}
+			if sub.Name == "" {
+				sub.Name = s.data.Subscriptions[i].Name
+			}
+			break
+		}
+	}
+	sub.Enabled = true
+	sub.LastSyncAt = now
+	sub.LastError = ""
+	sub.UpdatedAt = now
+
+	// Display names and URI encoding can change without changing a connection.
+	// Keep a queue for each connection so duplicate feed entries each retain
+	// their own ID instead of reusing one outbound tag more than once.
+	existing := make(map[string][]model.Node)
+	for _, n := range s.data.Nodes {
+		if n.Subscription == sub.ID {
+			key := nodeRefreshKey(n)
+			existing[key] = append(existing[key], n)
+		}
+	}
+	newNodes := make([]model.Node, 0, len(incoming))
+	seen := make(map[string]bool)
+	for _, n := range incoming {
+		// Remote input must not select IDs belonging to manual nodes or other
+		// subscriptions. Only a match in this subscription may retain an ID.
+		n.ID = ""
+		n.Subscription = sub.ID
+		n.Enabled = true
+		key := nodeRefreshKey(n)
+		if matches := existing[key]; len(matches) > 0 {
+			old := matches[0]
+			existing[key] = matches[1:]
+			n.ID = old.ID
+			n.CreatedAt = old.CreatedAt
+			if n.Remark == "" {
+				n.Remark = old.Remark
+			}
+			seen[old.ID] = true
+		}
+		if n.ID == "" {
+			n.ID = ID("node")
+		}
+		if n.CreatedAt.IsZero() {
+			n.CreatedAt = now
+		}
+		n.UpdatedAt = now
+		newNodes = append(newNodes, n)
+	}
+	var removedIDs []string
+	for _, old := range s.data.Nodes {
+		if old.Subscription == sub.ID && !seen[old.ID] {
+			removedIDs = append(removedIDs, old.ID)
+		}
+	}
+	if len(removedIDs) > 0 {
+		var bound []model.Device
+		for _, d := range s.data.Devices {
+			for _, id := range removedIDs {
+				if d.NodeID == id {
+					bound = append(bound, d)
+					break
+				}
+			}
+		}
+		if len(bound) > 0 {
+			return model.Subscription{}, nil, &SubscriptionInUseError{Devices: bound}
+		}
+	}
+	kept := make([]model.Node, 0, len(s.data.Nodes)+len(newNodes))
+	for _, old := range s.data.Nodes {
+		if old.Subscription != sub.ID {
+			kept = append(kept, old)
+		}
+	}
+	kept = append(kept, newNodes...)
+	s.data.Nodes = kept
+	found := false
+	for i := range s.data.Subscriptions {
+		if s.data.Subscriptions[i].ID == sub.ID {
+			s.data.Subscriptions[i] = sub
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.data.Subscriptions = append(s.data.Subscriptions, sub)
+	}
+	if err := s.saveLocked(); err != nil {
+		s.data = previous
+		return model.Subscription{}, nil, err
+	}
+	return sub, append([]model.Node(nil), newNodes...), nil
+}
+
+// UpdateSubscription edits display metadata without touching its imported
+// nodes. This is used by the UI's rename/remark controls.
+func (s *Store) UpdateSubscription(id string, fn func(*model.Subscription) error) (model.Subscription, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.data.Subscriptions {
+		if s.data.Subscriptions[i].ID != id {
+			continue
+		}
+		candidate := s.data.Subscriptions[i]
+		if err := fn(&candidate); err != nil {
+			return model.Subscription{}, err
+		}
+		candidate.UpdatedAt = time.Now()
+		previous := s.data.Subscriptions[i]
+		s.data.Subscriptions[i] = candidate
+		if err := s.saveLocked(); err != nil {
+			s.data.Subscriptions[i] = previous
+			return model.Subscription{}, err
+		}
+		return candidate, nil
+	}
+	return model.Subscription{}, os.ErrNotExist
+}
+
+func nodeRefreshKey(n model.Node) string {
+	// Include every supported connection field, but omit display metadata,
+	// the original URI (whose fragment / vmess ps contains the name), and
+	// local IDs, timestamps and test results. JSON avoids delimiter collisions
+	// in credentials and remains stable for this fixed struct.
+	connection := model.Node{
+		Type: n.Type, Address: n.Address, Port: n.Port,
+		UUID: n.UUID, Password: n.Password, Method: n.Method,
+		Flow: n.Flow, Network: n.Network, SNI: n.SNI,
+		RealityPublicKey: n.RealityPublicKey, RealityShortID: n.RealityShortID,
+		Fingerprint: n.Fingerprint, Host: n.Host, Path: n.Path, TLS: n.TLS,
+	}
+	b, _ := json.Marshal(connection)
+	return string(b)
+}
+
+// DeleteSubscription removes the subscription and all of its nodes after
+// checking every device (including offline and hidden clients) for a binding.
+func (s *Store) DeleteSubscription(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i, sub := range s.data.Subscriptions {
+		if sub.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return os.ErrNotExist
+	}
+	var nodeIDs []string
+	for _, n := range s.data.Nodes {
+		if n.Subscription == id {
+			nodeIDs = append(nodeIDs, n.ID)
+		}
+	}
+	if len(nodeIDs) > 0 {
+		var bound []model.Device
+		for _, d := range s.data.Devices {
+			for _, nid := range nodeIDs {
+				if d.NodeID == nid {
+					bound = append(bound, d)
+					break
+				}
+			}
+		}
+		if len(bound) > 0 {
+			return &SubscriptionInUseError{Devices: bound}
+		}
+	}
+	previous := s.data
+	previous.Nodes = append([]model.Node(nil), s.data.Nodes...)
+	previous.Subscriptions = append([]model.Subscription(nil), s.data.Subscriptions...)
+	filtered := s.data.Nodes[:0]
+	for _, n := range s.data.Nodes {
+		if n.Subscription != id {
+			filtered = append(filtered, n)
+		}
+	}
+	s.data.Nodes = filtered
+	s.data.Subscriptions = append(s.data.Subscriptions[:idx], s.data.Subscriptions[idx+1:]...)
+	if err := s.saveLocked(); err != nil {
+		s.data = previous
+		return err
+	}
+	return nil
 }
 
 func (s *Store) UpdateSettings(v model.Settings) error {
