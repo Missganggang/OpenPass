@@ -19,16 +19,26 @@ type l2tpRuntime struct {
 	reconnected string
 	missing     []string
 	err         error
+	depReads    int
+	statusReads int
+	moduleError string
 }
 
 func (rt *l2tpRuntime) Apply(st model.State) error {
 	rt.applied, rt.applies = st, rt.applies+1
+	rt.moduleError = ""
+	if rt.err != nil {
+		rt.moduleError = rt.err.Error()
+	}
 	return rt.err
 }
+func (rt *l2tpRuntime) L2TPModuleError() string { return rt.moduleError }
 func (rt *l2tpRuntime) L2TPDependencies() l2tp.Dependencies {
+	rt.depReads++
 	return l2tp.Dependencies{Ready: len(rt.missing) == 0, Missing: rt.missing}
 }
 func (rt *l2tpRuntime) L2TPStatuses(ns []model.Node) map[string]l2tp.Status {
+	rt.statusReads++
 	out := map[string]l2tp.Status{}
 	for _, n := range ns {
 		st := l2tp.Status{State: "disconnected", Interface: "optest"}

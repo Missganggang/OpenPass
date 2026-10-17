@@ -47,7 +47,7 @@ LuCI 的 **关闭 OpenPass** 会停止管理后台及它启动的 sing-box，撤
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.13 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.14 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
@@ -78,6 +78,19 @@ Ping/TCPing 只验证服务器的 ICMP/TCP 连通性，URL 测试才会验证节
 ## 纯 L2TP 连接
 
 在管理页面点击 **L2TP**，填写连接名称、服务器 IPv4 地址或域名、用户名、密码及可选备注，默认 MTU 为 1400，可在 1280–1460 之间调整。新连接保存后处于断开状态，点击 **连接** 后才会启用；点击 **重连** 可重新拨号。页面显示连接中、已连接、已断开或错误，以及接口地址、在线时长和错误信息。这里的“已连接”表示 netifd 已建立 PPP 接口，不代表已经验证任意网站可访问。
+
+L2TP 页面提供独立总开关。关闭后会断开本插件的所有 L2TP 连接、停止后台连接监测和页面每 5 秒自动刷新，普通代理仍按原配置运行。线路资料和各条线路原来的连接开关都会保留；再次开启会恢复之前启用的线路。已绑定 L2TP 的设备在关闭期间保持断网，不会自动直连，可在设备管理中主动解除绑定或改为直连。关闭期间仍可编辑、复制和批量添加线路。
+
+编辑已保存的连接时，密码默认以星号占位隐藏；点击小眼睛才读取并显示保存的密码，也可以再次隐藏。留空保存仍保留原密码。点击“复制信息”会复制完整的 `服务器:用户名:密码`，可以直接用于批量添加。
+
+“批量添加”支持每行一条，例如：
+
+```text
+vpn-a.example.com:user-a:password-a
+vpn-b.example.com:user-b:password-b
+```
+
+每次最多 500 条；整批先校验再保存，错误只显示所在行号，已有相同地址、用户名和密码的线路会跳过。新增线路默认为断开状态，确认后再连接。密码中的冒号会保留为密码内容。
 
 连接启用后，可在设备管理和设备自助页选中该 L2TP 连接，名称和备注会一起显示。设备通过对应 PPP 接口全局出站，业务流量不进入 sing-box TUN；设备选择的 DoH 仍由 sing-box 处理，但 HTTPS 请求绑定到同一 PPP 接口发送。隧道断开时，绑定设备保留绑定并被阻止回退本地 WAN；如需本地网络，请显式把设备改为直连。删除连接前必须先解绑所有设备，包括离线和隐藏设备。
 
@@ -142,7 +155,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.13
+make packages VERSION=0.1.14
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS

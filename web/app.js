@@ -9,8 +9,9 @@
     devices: [], allDevices: [], nodes: [], subscriptions: [], nodeSubscriptionFilter: 'all', settings: {}, dns: [], status: {},
     standalone: /^\/(choose|self)\/?$/.test(location.pathname),
     self: null, selfMode: null, selfLoading: false, pendingProxy: new Set(), deletingNodes: new Set(),
-    l2tpConnections: [], l2tpDependencies: null, l2tpLoaded: false, l2tpError: '', l2tpUpdatedAt: null,
+    l2tpConnections: [], l2tpDependencies: null, l2tpLoaded: false, l2tpError: '', l2tpUpdatedAt: null, l2tpEnabled: null, l2tpSwitching: false, l2tpModuleError: readL2TPModuleError(),
     l2tpPending: new Set(), l2tpRefreshPromise: null, l2tpTimer: null, l2tpEditing: null, l2tpSaving: false,
+    l2tpFormGeneration: 0, l2tpPasswordRevision: 0, l2tpPasswordLoaded: false, l2tpImporting: false,
     demo: false
   };
 
@@ -166,18 +167,19 @@
   function renderSelf() {
     const data = state.self || {};
     const device = data.device;
-    const nodes = responseList(data, 'nodes').filter(n => n.enabled !== false);
+    const nodes = responseList(data, 'nodes').filter(n => n.enabled !== false && !(data.l2tp_enabled === false && isL2TP(n)));
     const identified = !!(device?.ip && device?.mac) && data.can_bind !== false;
     $('#selfPreviewDevice').textContent = device?.hostname || '当前访问设备';
     $('#selfDeviceIP').textContent = device?.ip || data.ip || '未识别';
     $('#selfDeviceMAC').textContent = device?.mac || '未识别';
     $('#selfDeviceRemark').textContent = device?.remark || '暂无备注';
     $('#selfCurrentMode').textContent = device ? ({ proxy: '代理节点', direct: '本地直连', blocked: '禁止网络' }[device.mode] || '未设置') : '未识别';
-    const boundNode = responseList(data, 'nodes').find(n => n.id === device?.node_id);
+    const boundNode = data.bound_node?.id === device?.node_id ? data.bound_node : responseList(data, 'nodes').find(n => n.id === device?.node_id);
+    const l2tpDisabled = device?.mode === 'proxy' && data.l2tp_enabled === false && isL2TP(boundNode);
     $('#selfCurrentNode').textContent = device?.mode === 'proxy' && device.node_id ? (boundNode ? nodeLabel(boundNode) : '节点已删除或停用') : '未绑定';
     const enabled = data.enabled ?? data.protection_enabled ?? state.settings.enabled;
-    const inactive = enabled === false || data.kernel_running === false;
-    $('#selfServiceNotice').textContent = enabled === false ? '全局保护当前关闭，现有代理绑定未生效。选择代理节点并确认后将自动开启并应用。' : data.kernel_running === false ? '代理内核当前未运行，现有代理绑定未生效。请重新确认连接方式；如仍无法连接，请联系管理员。' : enabled === true ? '选择代理节点后立即应用；本地直连默认使用阿里 DoH（223.5.5.5）。' : '请先确认设备信息，再选择网络方式。';
+    const inactive = l2tpDisabled || enabled === false || data.kernel_running === false;
+    $('#selfServiceNotice').textContent = l2tpDisabled ? '管理员已关闭 L2TP，当前绑定已保留，设备暂时无法上网。可选择其他可用节点或本地直连，或联系管理员开启 L2TP。' : enabled === false ? '全局保护当前关闭，现有代理绑定未生效。选择代理节点并确认后将自动开启并应用。' : data.kernel_running === false ? '代理内核当前未运行，现有代理绑定未生效。请重新确认连接方式；如仍无法连接，请联系管理员。' : enabled === true ? '选择代理节点后立即应用；本地直连默认使用阿里 DoH（223.5.5.5）。' : '请先确认设备信息，再选择网络方式。';
     $('#selfServiceNotice').classList.toggle('notice-warning', inactive);
     if (device?.mode === 'proxy' && inactive) $('#selfCurrentMode').textContent = '代理节点（未生效）';
     $('#selfNodeSelect').innerHTML = '<option value="">请选择代理节点</option>' + nodes.map(n => `<option value="${esc(n.id)}">${esc(nodeLabel(n))}</option>`).join('');
@@ -217,7 +219,7 @@
 
   function renderAll() { renderStatus(); renderDashboard(); renderDevices(); renderSubscriptions(); renderNodes(); renderSettings(); renderDns(); navigate(state.page); }
   function renderStatus() {
-    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.13').replace(/^v/, '')}`;
+    $('#appVersion').textContent = `OpenPass v${String(state.status.version || '0.1.14').replace(/^v/, '')}`;
     const online = state.allDevices.filter(d => d.online && !d.hidden).length; const proxied = state.allDevices.filter(d => d.mode === 'proxy' && !d.hidden).length; const healthy = state.nodes.filter(n => nodeURLResult(n) === true && n.enabled !== false).length;
     $('#metricOnline').textContent = online; $('#metricProxied').textContent = proxied; $('#metricNodes').textContent = healthy; $('#onlineBadge').textContent = online; $('#nodesBadge').textContent = regularNodes().length; $('#onlineCount').textContent = online; $('#offlineCount').textContent = state.allDevices.filter(d => !d.online && !d.hidden).length; $('#hiddenCount').textContent = state.allDevices.filter(d => d.hidden).length; $('#hiddenTabCount').textContent = state.allDevices.filter(d => d.hidden).length;
     if ($('#l2tpBadge')) $('#l2tpBadge').textContent = state.nodes.filter(isL2TP).length;
@@ -239,8 +241,11 @@
   function deviceModeSelect(d) {
     const pending = state.pendingProxy.has(String(d.id));
     const mode = pending ? 'proxy' : d.mode;
+    const bound = findNode(d.node_id), l2tpDisabled = mode === 'proxy' && state.settings.l2tp_disabled === true && isL2TP(bound);
     const inactive = mode === 'proxy' && ((state.settings.enabled ?? state.status.enabled) === false || state.status.kernel_running === false);
-    return `<select class="mode-select ${esc(mode || '')}" data-action="mode" data-id="${esc(d.id)}" aria-label="设备连接方式"><option value="proxy" ${mode === 'proxy' ? 'selected' : ''}>代理节点</option><option value="direct" ${mode === 'direct' ? 'selected' : ''}>直连网络</option><option value="blocked" ${mode === 'blocked' ? 'selected' : ''}>禁止网络</option></select>${mode === 'proxy' ? `<select class="mode-select proxy node-select" data-action="node" data-id="${esc(d.id)}" aria-label="绑定代理节点"><option value="">选择节点</option>${state.nodes.filter(n => n.enabled !== false).map(n => `<option value="${esc(n.id)}" ${!pending && String(d.node_id) === String(n.id) ? 'selected' : ''}>${esc(nodeLabel(n))}</option>`).join('')}</select>` : ''}${pending ? '<small class="device-policy-note">选择节点后立即绑定</small>' : inactive ? '<small class="device-policy-note warning">代理当前未生效</small>' : ''}`;
+    const nodes = state.nodes.filter(n => n.enabled !== false && !(state.settings.l2tp_disabled === true && isL2TP(n)));
+    const unavailableBound = !pending && l2tpDisabled ? `<option value="${esc(bound.id)}" selected disabled>${esc(nodeLabel(bound))}（L2TP 已关闭）</option>` : '';
+    return `<select class="mode-select ${esc(mode || '')}" data-action="mode" data-id="${esc(d.id)}" aria-label="设备连接方式"><option value="proxy" ${mode === 'proxy' ? 'selected' : ''}>代理节点</option><option value="direct" ${mode === 'direct' ? 'selected' : ''}>直连网络</option><option value="blocked" ${mode === 'blocked' ? 'selected' : ''}>禁止网络</option></select>${mode === 'proxy' ? `<select class="mode-select proxy node-select" data-action="node" data-id="${esc(d.id)}" aria-label="绑定代理节点"><option value="">选择节点</option>${unavailableBound}${nodes.map(n => `<option value="${esc(n.id)}" ${!pending && String(d.node_id) === String(n.id) ? 'selected' : ''}>${esc(nodeLabel(n))}</option>`).join('')}</select>` : ''}${pending ? '<small class="device-policy-note">选择节点后立即绑定</small>' : l2tpDisabled ? '<small class="device-policy-note warning">L2TP 已关闭，当前设备已断网</small>' : inactive ? '<small class="device-policy-note warning">代理当前未生效</small>' : ''}`;
   }
   function dnsSelect(d) { const all = state.dns.length ? state.dns.slice() : demoDns.slice(); if (state.settings.custom_dns && !all.some(x => x.id === 'custom')) all.push({ id: 'custom', name: '自定义 DoH' }); const selected = d.dns || (d.mode === 'direct' ? 'aliyun' : 'cloudflare'); return `<select class="mode-select" data-action="dns" data-id="${esc(d.id)}" aria-label="设备 DNS">${all.map(x => `<option value="${esc(x.id)}" ${String(selected) === String(x.id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`; }
   function renderDevices() {
@@ -302,9 +307,27 @@
       return `<tr><td><div class="device-cell"><span class="device-avatar">◈</span><span class="device-name">${esc(node.name || node.address)}${node.remark ? `<small class="node-remark">备注：${esc(node.remark)}</small>` : ''}${subLabel ? `<small class="node-remark subscription-node-label">订阅：${esc(subLabel)}</small>` : ''}<small>${esc(node.address || '')}:${esc(node.port || '')}</small></span></div></td><td><span class="protocol-badge ${esc(node.type || '')}">${esc(node.type || 'unknown')}</span></td><td><span class="latency">${result?.ok ? `${esc(result.latency_ms)} ms` : '—'}</span><small class="test-caption">代理 URL 延迟</small></td><td><span class="status-label ${statusClass}"><i></i>${label}</span><div class="node-test-results">${nodeTestSummary(node)}</div></td><td class="muted">${esc(node.last_test ? timeText(node.last_test) : '—')}</td><td class="align-right"><span class="row-actions"><button class="row-action" data-action="remark-node" data-id="${esc(node.id)}" title="编辑备注">备注</button><button class="row-action node-share" data-action="copy-node" data-id="${esc(node.id)}" title="复制节点链接">复制</button><button class="row-action node-share" data-action="export-node" data-id="${esc(node.id)}" title="导出节点链接">导出</button>${actions}<button class="row-action danger" data-action="delete-node" data-id="${esc(node.id)}" title="删除节点" ${state.deletingNodes.has(String(node.id)) ? 'disabled' : ''}>×</button></span></td></tr>`;
     }).join('');
   }
-  function l2tpOnline(connection) { return connection?.status?.connected === true || ['connected', 'online'].includes(connection?.status?.state); }
+  function readL2TPModuleError() {
+    try {
+      const error = JSON.parse(sessionStorage.getItem('openpass.l2tpModuleError') || 'null');
+      return typeof error?.enabled === 'boolean' && typeof error.message === 'string' ? error : null;
+    } catch (_) { return null; }
+  }
+  function saveL2TPModuleError(error) {
+    state.l2tpModuleError = error;
+    try {
+      if (error) sessionStorage.setItem('openpass.l2tpModuleError', JSON.stringify(error));
+      else sessionStorage.removeItem('openpass.l2tpModuleError');
+    } catch (_) { /* The persistent page notice still works if browser storage is unavailable. */ }
+  }
+  function acceptL2TPApplyState(result) {
+    if (typeof result?.apply_error !== 'string') return;
+    saveL2TPModuleError(result.apply_error ? { enabled: result.enabled !== false, message: result.apply_error } : null);
+  }
+  function l2tpOnline(connection) { return !state.l2tpModuleError && state.l2tpEnabled !== false && (connection?.status?.connected === true || ['connected', 'online'].includes(connection?.status?.state)); }
   function l2tpStatus(connection) {
-    if (state.l2tpError) return { key: 'unknown', label: '状态待确认' };
+    if (state.l2tpError || state.l2tpModuleError) return { key: 'unknown', label: '状态待确认' };
+    if (state.l2tpEnabled === false || connection?.status?.state === 'disabled') return { key: 'offline', label: 'L2TP 已关闭' };
     if (l2tpOnline(connection)) return { key: 'online', label: '在线' };
     const status = connection?.status || {};
     if (status.state === 'connecting') return { key: 'connecting', label: '连接中' };
@@ -326,14 +349,25 @@
     const list = $('#l2tpList');
     if (!list) return;
     const connections = state.l2tpConnections;
-    $('#l2tpOnlineCount').textContent = state.l2tpError ? '—' : connections.filter(l2tpOnline).length;
+    $('#l2tpOnlineCount').textContent = state.l2tpError || state.l2tpModuleError ? '—' : connections.filter(l2tpOnline).length;
     $('#l2tpTotalCount').textContent = `${connections.length} 条连接`;
     $('#l2tpBadge').textContent = connections.length;
-    $('#l2tpRefreshTime').textContent = state.l2tpRefreshPromise ? '正在刷新连接状态…' : state.l2tpError ? '刷新失败，请重试；以下数据可能已过期' : state.l2tpUpdatedAt ? `更新于 ${state.l2tpUpdatedAt.toLocaleTimeString('zh-CN')} · 每 5 秒自动刷新` : '此页面每 5 秒刷新连接状态';
-    const error = $('#l2tpLoadError'); error.textContent = state.l2tpError ? `读取连接状态失败：${state.l2tpError}` : ''; error.classList.toggle('hidden', !state.l2tpError);
+    const refreshMode = state.l2tpModuleError ? `应用状态未确认 · ${state.l2tpEnabled === false ? '自动刷新已停止' : '每 5 秒自动刷新'}` : state.l2tpEnabled === false ? 'L2TP 已关闭 · 自动刷新已停止' : '每 5 秒自动刷新';
+    $('#l2tpRefreshTime').textContent = state.l2tpRefreshPromise ? '正在刷新连接状态…' : state.l2tpError ? `刷新失败，请重试；以下数据可能已过期${state.l2tpEnabled === false ? ' · 自动刷新已停止' : ''}` : state.l2tpUpdatedAt ? `更新于 ${state.l2tpUpdatedAt.toLocaleTimeString('zh-CN')} · ${refreshMode}` : '正在读取 L2TP 开关状态…';
+    const toggle = $('#toggleL2TPBtn');
+    toggle.textContent = state.l2tpSwitching ? '正在应用…' : state.l2tpEnabled === false ? '开启 L2TP' : '关闭 L2TP';
+    toggle.disabled = state.l2tpSwitching || !state.l2tpLoaded || !!state.l2tpError || state.l2tpPending.size > 0 || state.l2tpSaving || state.l2tpImporting;
+    toggle.setAttribute('aria-pressed', String(state.l2tpEnabled === true));
+    $('#l2tpModuleState').textContent = state.l2tpModuleError ? 'L2TP 应用未确认' : state.l2tpEnabled === null ? '状态待确认' : state.l2tpEnabled ? 'L2TP 已开启' : 'L2TP 已关闭';
+    $('#l2tpModuleState').classList.toggle('enabled', state.l2tpEnabled === true && !state.l2tpModuleError);
+    $('#l2tpDisabledNotice').classList.toggle('hidden', state.l2tpEnabled !== false || !!state.l2tpModuleError);
+    const error = $('#l2tpLoadError'), operationError = state.l2tpModuleError;
+    const retryDisabled = state.l2tpSwitching || state.l2tpPending.size || state.l2tpSaving || state.l2tpImporting;
+    error.innerHTML = [operationError ? `<strong>L2TP ${operationError.enabled ? '开启' : '关闭'}未完成，应用状态尚未确认。</strong><br><span>设置可能已保存，但隧道运行状态不能据此确认。${esc(operationError.message)}</span><br><button class="btn btn-ghost" type="button" data-l2tp-retry ${retryDisabled ? 'disabled' : ''}>${state.l2tpSwitching ? '正在重试…' : '重试应用'}</button>` : '', state.l2tpError ? `<span>读取连接状态失败：${esc(state.l2tpError)}</span>` : ''].filter(Boolean).join('<br>');
+    error.classList.toggle('hidden', !operationError && !state.l2tpError);
     const dependencies = state.l2tpDependencies;
     const dependencyNotice = $('#l2tpDependencies');
-    const missing = dependencies && dependencies.available === false;
+    const missing = state.l2tpEnabled !== false && dependencies && (dependencies.available === false || dependencies.ready === false);
     dependencyNotice.textContent = missing ? `L2TP 运行组件尚未就绪${Array.isArray(dependencies.missing) && dependencies.missing.length ? `：${dependencies.missing.join('、')}` : ''}。可先保存连接信息，安装所需组件后再连接。` : '';
     dependencyNotice.classList.toggle('hidden', !missing);
     const refresh = $('#refreshL2TPBtn'); refresh.disabled = !!state.l2tpRefreshPromise; refresh.textContent = state.l2tpRefreshPromise ? '↻ 刷新中…' : '↻ 刷新状态'; refresh.setAttribute('aria-busy', String(!!state.l2tpRefreshPromise));
@@ -344,7 +378,7 @@
     list.innerHTML = connections.map(connection => {
       const status = connection.status || {}, visual = l2tpStatus(connection), id = String(connection.id);
       const busy = state.l2tpPending.has(id), connected = l2tpOnline(connection), desired = connection.enabled !== false;
-      const disabled = busy ? 'disabled' : '', connectDisabled = busy || missing || !!state.l2tpError ? 'disabled' : '';
+      const disabled = busy || state.l2tpSwitching ? 'disabled' : '', connectDisabled = busy || state.l2tpSwitching || state.l2tpEnabled === false || missing || !!state.l2tpError ? 'disabled' : '';
       const bound = l2tpBoundCount(connection);
       return `<article class="panel l2tp-card ${visual.key === 'online' ? 'l2tp-card-online' : ''}"><div class="l2tp-card-head"><span class="l2tp-card-icon">⇄</span><div class="l2tp-card-title"><h2>${esc(connection.name || connection.address || 'L2TP 连接')}</h2><span class="mono">${esc(connection.address || '—')}</span></div><span class="l2tp-state ${visual.key}" role="status"><i></i>${visual.label}</span></div>${connection.remark ? `<p class="l2tp-remark">${esc(connection.remark)}</p>` : ''}<dl class="l2tp-details"><div><dt>接口</dt><dd class="mono">${esc(status.device || status.interface || '—')}</dd></div><div><dt>隧道 IP</dt><dd class="mono">${esc(status.local_ip || '—')}</dd></div><div><dt>连接时长</dt><dd>${connected && !state.l2tpError ? esc(l2tpDuration(status.uptime)) : '—'}</dd></div><div><dt>绑定设备</dt><dd><button class="text-btn" type="button" data-l2tp-action="devices" data-id="${esc(id)}">${bound} 台 · 查看</button></dd></div></dl>${status.last_error ? `<p class="l2tp-connection-error">${esc(status.last_error)}</p>` : ''}<div class="l2tp-card-actions">${desired || connected || status.state === 'connecting' ? `<button class="btn btn-ghost" type="button" data-l2tp-action="disconnect" data-id="${esc(id)}" ${disabled}>断开</button><button class="btn btn-primary" type="button" data-l2tp-action="reconnect" data-id="${esc(id)}" ${connectDisabled}>重新连接</button>` : `<button class="btn btn-primary" type="button" data-l2tp-action="connect" data-id="${esc(id)}" ${connectDisabled}>连接</button>`}<span class="l2tp-action-spacer"></span><button class="text-btn" type="button" data-l2tp-action="edit" data-id="${esc(id)}" ${disabled}>编辑</button><button class="text-btn" type="button" data-l2tp-action="copy" data-id="${esc(id)}" ${disabled}>复制信息</button><button class="text-btn l2tp-delete" type="button" data-l2tp-action="delete" data-id="${esc(id)}" ${disabled}>删除</button></div>${busy ? '<p class="l2tp-operation" role="status">正在处理，请稍候…</p>' : ''}</article>`;
     }).join('');
@@ -360,6 +394,9 @@
         const result = await api('/l2tp', { cache: 'no-store' });
         if (!Array.isArray(result?.connections)) throw new Error('服务器返回的连接列表无效');
         state.l2tpConnections = responseList(result, 'connections');
+        state.l2tpEnabled = result.enabled !== false;
+        acceptL2TPApplyState(result);
+        state.settings.l2tp_disabled = !state.l2tpEnabled;
         state.l2tpDependencies = result.dependencies || null;
         state.l2tpError = ''; state.l2tpLoaded = true; state.l2tpUpdatedAt = new Date();
         state.nodes = regularNodes().concat(state.l2tpConnections);
@@ -369,6 +406,7 @@
     renderL2TP();
     const ok = await state.l2tpRefreshPromise;
     state.l2tpRefreshPromise = null;
+    syncL2TPPolling(false);
     renderL2TP();
     if (notify) toast(ok ? `L2TP 状态已刷新：${state.l2tpConnections.filter(l2tpOnline).length} 条在线` : `刷新失败：${state.l2tpError}`, ok ? 'success' : 'error');
     return ok;
@@ -383,31 +421,97 @@
       return true;
     } catch (_) { return false; }
   }
-  function syncL2TPPolling() {
-    if (state.standalone || state.page !== 'l2tp' || document.hidden) {
+  function syncL2TPPolling(read = true) {
+    const visible = !state.standalone && state.page === 'l2tp' && !document.hidden;
+    if (!visible || state.l2tpEnabled !== true || state.l2tpSwitching) {
       if (state.l2tpTimer !== null) clearInterval(state.l2tpTimer);
       state.l2tpTimer = null;
-      return;
     }
+    if (!visible) return;
+    if (read) refreshL2TP();
+    if (state.l2tpEnabled !== true || state.l2tpSwitching) return;
     if (state.l2tpTimer !== null) return;
-    refreshL2TP();
     state.l2tpTimer = setInterval(() => {
-      if (state.page === 'l2tp' && !document.hidden && state.l2tpPending.size === 0 && !state.l2tpSaving) refreshL2TP();
+      if (state.page === 'l2tp' && !document.hidden && state.l2tpEnabled === true && !state.l2tpSwitching && state.l2tpPending.size === 0 && !state.l2tpSaving && !state.l2tpImporting) refreshL2TP();
     }, 5000);
   }
+  async function toggleL2TPModule() {
+    if (state.l2tpSwitching || !state.l2tpLoaded || state.l2tpError || state.l2tpPending.size || state.l2tpSaving || state.l2tpImporting) return;
+    const enabled = state.l2tpEnabled === false;
+    if (!enabled) {
+      const confirmed = await showActionDialog({ title: '关闭 L2TP', message: '关闭后将断开所有 L2TP 连接，并停止连接监测和页面的每 5 秒自动刷新。连接配置和设备绑定会保留；已绑定 L2TP 的设备将断网，不会回退直连。普通代理节点和直连设备继续正常使用。', submitText: '关闭 L2TP', danger: true });
+      if (!confirmed || state.l2tpSwitching) return;
+    }
+    return applyL2TPModule(enabled);
+  }
+  async function retryL2TPModule() {
+    if (!state.l2tpModuleError) return;
+    return applyL2TPModule(state.l2tpModuleError.enabled);
+  }
+  async function applyL2TPModule(enabled) {
+    if (state.l2tpSwitching || state.l2tpPending.size || state.l2tpSaving || state.l2tpImporting) return;
+    state.l2tpSwitching = true; syncL2TPPolling(false); renderL2TP();
+    try {
+      if (state.l2tpRefreshPromise) await state.l2tpRefreshPromise;
+      const result = await api('/l2tp/settings', { method: 'PATCH', body: { enabled } });
+      if (typeof result?.apply_error === 'string') acceptL2TPApplyState({ ...result, enabled });
+      else saveL2TPModuleError(null);
+      state.l2tpEnabled = enabled;
+      const refreshed = await refreshL2TP();
+      const globalRefreshed = enabled ? await refreshL2TPGlobalState() : true;
+      if (state.l2tpModuleError) { toast('设置已保存，但 L2TP 应用失败，请查看页面提示并重试', 'error'); return; }
+      const message = enabled ? 'L2TP 已开启，恢复之前启用的连接' : 'L2TP 已关闭，连接监测和自动刷新已停止';
+      toast(refreshed && globalRefreshed ? message : `${message}；但${!globalRefreshed ? '全局' : '连接'}状态刷新失败，请刷新页面`, refreshed && globalRefreshed ? 'success' : 'error');
+    } catch (error) {
+      saveL2TPModuleError({ enabled, message: error.message });
+      toast(`切换失败：${error.message}`, 'error');
+      await refreshL2TP();
+      if (enabled) await refreshL2TPGlobalState();
+    } finally { state.l2tpSwitching = false; syncL2TPPolling(false); renderL2TP(); }
+  }
   let l2tpPreviousFocus = null;
+  function renderL2TPPasswordToggle() {
+    const visible = $('#l2tpPassword').type === 'text', button = $('#toggleL2TPPassword');
+    button.setAttribute('aria-label', visible ? '隐藏密码' : '查看密码');
+    button.setAttribute('title', visible ? '隐藏密码' : '查看密码');
+    button.setAttribute('aria-pressed', String(visible));
+    button.classList.toggle('revealed', visible);
+  }
+  async function toggleL2TPPassword() {
+    const field = $('#l2tpPassword'), button = $('#toggleL2TPPassword');
+    if (button.disabled || state.l2tpSaving) return;
+    if (field.type === 'text') { field.type = 'password'; renderL2TPPasswordToggle(); return; }
+    if (field.value || !state.l2tpEditing) { field.type = 'text'; renderL2TPPasswordToggle(); return; }
+    const id = state.l2tpEditing, generation = state.l2tpFormGeneration, revision = state.l2tpPasswordRevision;
+    button.disabled = true; button.setAttribute('aria-busy', 'true');
+    try {
+      const credentials = await api(`/l2tp/${encodeURIComponent(id)}/credentials`, { method: 'POST', cache: 'no-store' });
+      if (generation !== state.l2tpFormGeneration || $('#l2tpModalBackdrop').classList.contains('hidden') || revision !== state.l2tpPasswordRevision || field.value || state.l2tpSaving) return;
+      if (typeof credentials?.password !== 'string') throw new Error('服务器返回的密码无效');
+      field.value = credentials.password; field.type = 'text'; state.l2tpPasswordLoaded = true;
+      renderL2TPPasswordToggle();
+    } catch (error) {
+      if (generation === state.l2tpFormGeneration && !$('#l2tpModalBackdrop').classList.contains('hidden')) {
+        $('#l2tpFormError').textContent = `读取密码失败：${error.message}`; $('#l2tpFormError').classList.remove('hidden');
+      }
+    } finally {
+      if (generation === state.l2tpFormGeneration) { button.disabled = false; button.setAttribute('aria-busy', 'false'); }
+    }
+  }
   function openL2TPForm(id) {
     const connection = id ? l2tpByID(id) : null;
     if (id && !connection) return;
     state.l2tpEditing = connection ? String(connection.id) : null;
+    state.l2tpFormGeneration++; state.l2tpPasswordRevision = 0; state.l2tpPasswordLoaded = false;
     l2tpPreviousFocus = document.activeElement;
     $('#l2tpModalTitle').textContent = connection ? '编辑 L2TP 连接' : '添加 L2TP 连接';
-    $('#l2tpModalHint').textContent = connection?.enabled ? '修改连接参数后会重新连接；已绑定设备在重连期间会暂时断网。' : '保存后不会自动连接，请在连接卡片中点击“连接”。';
+    $('#l2tpModalHint').textContent = state.l2tpEnabled === false ? 'L2TP 当前已关闭，保存只更新连接信息；开启后才会恢复连接。' : connection?.enabled ? '修改连接参数后会重新连接；已绑定设备在重连期间会暂时断网。' : '保存后不会自动连接，请在连接卡片中点击“连接”。';
     $('#l2tpName').value = connection?.name || '';
     $('#l2tpAddress').value = connection?.address || '';
     $('#l2tpUsername').value = connection?.username || '';
-    $('#l2tpPassword').value = ''; $('#l2tpPassword').required = !connection;
-    $('#l2tpPasswordHint').textContent = connection ? '留空表示保留已保存的密码。' : '使用服务商提供的 L2TP 密码。';
+    $('#l2tpPassword').value = ''; $('#l2tpPassword').type = 'password'; $('#l2tpPassword').required = !connection; $('#l2tpPassword').placeholder = connection ? '*****' : '请输入密码';
+    $('#toggleL2TPPassword').disabled = false; $('#toggleL2TPPassword').setAttribute('aria-busy', 'false'); renderL2TPPasswordToggle();
+    $('#l2tpPasswordHint').textContent = connection ? '已保存密码。留空保留，点击眼睛查看，输入可更换。' : '使用服务商提供的 L2TP 密码。';
     $('#l2tpMTU').value = connection?.mtu || 1400;
     $('#l2tpRemark').value = connection?.remark || '';
     $('#l2tpFormError').textContent = ''; $('#l2tpFormError').classList.add('hidden');
@@ -417,18 +521,19 @@
   function closeL2TPForm() {
     if (state.l2tpSaving) return;
     $('#l2tpModalBackdrop').classList.add('hidden'); $('.app-shell').inert = false;
-    $('#l2tpPassword').value = ''; state.l2tpEditing = null;
+    $('#l2tpPassword').value = ''; $('#l2tpPassword').type = 'password'; $('#l2tpUsername').value = '';
+    state.l2tpEditing = null; state.l2tpFormGeneration++; state.l2tpPasswordLoaded = false; renderL2TPPasswordToggle();
     if (l2tpPreviousFocus?.isConnected) l2tpPreviousFocus.focus();
   }
   async function saveL2TP(event) {
     event.preventDefault();
     if (state.l2tpSaving || !$('#l2tpForm').reportValidity()) return;
     const id = state.l2tpEditing;
-    const body = { name: $('#l2tpName').value.trim(), address: $('#l2tpAddress').value.trim(), username: $('#l2tpUsername').value.trim(), remark: $('#l2tpRemark').value.trim(), mtu: Number($('#l2tpMTU').value) };
+    const body = { name: $('#l2tpName').value.trim(), address: $('#l2tpAddress').value.trim(), username: $('#l2tpUsername').value, remark: $('#l2tpRemark').value.trim(), mtu: Number($('#l2tpMTU').value) };
     const password = $('#l2tpPassword').value;
-    if (password || !id) body.password = password;
+    if (!id || (password && !state.l2tpPasswordLoaded)) body.password = password;
     if (!id) body.enabled = false;
-    if (!body.name || !body.address || !body.username) { $('#l2tpFormError').textContent = '请填写连接名称、服务器地址和用户名。'; $('#l2tpFormError').classList.remove('hidden'); return; }
+    if (!body.name || !body.address || !body.username.trim()) { $('#l2tpFormError').textContent = '请填写连接名称、服务器地址和用户名。'; $('#l2tpFormError').classList.remove('hidden'); return; }
     state.l2tpSaving = true; $('#saveL2TPBtn').disabled = true; $('#saveL2TPBtn').textContent = '保存中…';
     $('#l2tpModalClose').disabled = true; $('#l2tpModalCancel').disabled = true;
     let saved = false;
@@ -444,6 +549,45 @@
     } finally {
       state.l2tpSaving = false; $('#saveL2TPBtn').disabled = false; $('#saveL2TPBtn').textContent = '保存连接';
       $('#l2tpModalClose').disabled = false; $('#l2tpModalCancel').disabled = false;
+    }
+  }
+  let l2tpImportPreviousFocus = null;
+  function openL2TPImport() {
+    if (state.l2tpImporting) return;
+    l2tpImportPreviousFocus = document.activeElement;
+    $('#l2tpImportText').value = ''; $('#l2tpImportError').textContent = ''; $('#l2tpImportError').classList.add('hidden');
+    $('#l2tpImportBackdrop').classList.remove('hidden'); $('.app-shell').inert = true;
+    $('#l2tpImportText').focus();
+  }
+  function closeL2TPImport() {
+    if (state.l2tpImporting) return;
+    $('#l2tpImportBackdrop').classList.add('hidden'); $('#l2tpImportText').value = ''; $('.app-shell').inert = false;
+    if (l2tpImportPreviousFocus?.isConnected) l2tpImportPreviousFocus.focus();
+  }
+  async function importL2TP(event) {
+    event.preventDefault();
+    if (state.l2tpImporting || !$('#l2tpImportForm').reportValidity()) return;
+    const text = $('#l2tpImportText').value;
+    const count = text.split(/\r?\n/).filter(line => line.trim()).length;
+    if (!count || count > 500) {
+      $('#l2tpImportError').textContent = count ? '一次最多添加 500 条连接，请分批导入。' : '请先粘贴至少一条 L2TP 连接。';
+      $('#l2tpImportError').classList.remove('hidden'); return;
+    }
+    state.l2tpImporting = true; $('#importL2TPSubmit').disabled = true; $('#importL2TPSubmit').textContent = '正在导入…';
+    $('#l2tpImportClose').disabled = true; $('#l2tpImportCancel').disabled = true;
+    let imported = false;
+    try {
+      if (state.l2tpRefreshPromise) await state.l2tpRefreshPromise;
+      const result = await api('/l2tp/import', { method: 'POST', body: { text } });
+      imported = true; state.l2tpImporting = false; closeL2TPImport();
+      const refreshed = await refreshL2TP();
+      toast(`已添加 ${Number(result?.imported) || 0} 条 L2TP，跳过 ${Number(result?.skipped) || 0} 条重复连接。新连接默认断开${refreshed ? '' : '；状态刷新失败，请手动刷新'}`, refreshed ? 'success' : 'error');
+    } catch (error) {
+      if (!imported) { $('#l2tpImportError').textContent = `导入失败：${error.message}`; $('#l2tpImportError').classList.remove('hidden'); }
+      else toast(`导入已完成，但状态刷新失败：${error.message}`, 'error');
+    } finally {
+      state.l2tpImporting = false; $('#importL2TPSubmit').disabled = false; $('#importL2TPSubmit').textContent = '批量添加';
+      $('#l2tpImportClose').disabled = false; $('#l2tpImportCancel').disabled = false;
     }
   }
   async function runL2TPAction(action, id) {
@@ -463,12 +607,18 @@
       return;
     }
     if (action === 'copy') {
-      const status = connection.status || {};
-      const info = [`名称：${connection.name || ''}`, '协议：L2TP', `服务器：${connection.address || ''}`, `状态：${l2tpStatus(connection).label}`, `接口：${status.device || status.interface || '—'}`, `隧道 IP：${status.local_ip || '—'}`, connection.remark ? `备注：${connection.remark}` : ''].filter(Boolean).join('\n');
-      const copied = await copyText(info);
-      toast(copied ? '连接信息已复制（不含账号密码）' : '复制失败，请检查浏览器剪贴板权限', copied ? 'success' : 'error'); return;
+      state.l2tpPending.add(String(id)); renderL2TP();
+      try {
+        const credentials = await api(`/l2tp/${encodeURIComponent(id)}/credentials`, { method: 'POST', cache: 'no-store' });
+        if (!credentials?.address || typeof credentials.username !== 'string' || typeof credentials.password !== 'string') throw new Error('服务器返回的账号信息无效');
+        const copied = await copyText(`${credentials.address}:${credentials.username}:${credentials.password}`);
+        toast(copied ? '已复制服务器、用户名和密码，可用于批量添加' : '复制失败，请检查浏览器剪贴板权限', copied ? 'success' : 'error');
+      } catch (error) { toast(`复制失败：${error.message}`, 'error'); }
+      finally { state.l2tpPending.delete(String(id)); renderL2TP(); }
+      return;
     }
     if (!['connect', 'disconnect', 'reconnect', 'delete'].includes(action)) return;
+    if (state.l2tpSwitching || (state.l2tpEnabled === false && ['connect', 'reconnect'].includes(action))) { toast('请先开启 L2TP', 'error'); return; }
     state.l2tpPending.add(String(id)); renderL2TP();
     try {
       if (action === 'delete') {
@@ -497,17 +647,26 @@
   }
   function setupL2TPEvents() {
     $('#addL2TPBtn')?.addEventListener('click', () => openL2TPForm());
+    $('#toggleL2TPBtn')?.addEventListener('click', toggleL2TPModule);
+    $('#l2tpLoadError')?.addEventListener('click', event => { const button = event.target.closest('[data-l2tp-retry]'); if (button && !button.disabled) retryL2TPModule(); });
+    $('#batchL2TPBtn')?.addEventListener('click', openL2TPImport);
     $('#refreshL2TPBtn')?.addEventListener('click', () => refreshL2TP(true));
     $('#l2tpList')?.addEventListener('click', event => { const button = event.target.closest('[data-l2tp-action]'); if (button && !button.disabled) runL2TPAction(button.dataset.l2tpAction, button.dataset.id); });
     $('#l2tpForm')?.addEventListener('submit', saveL2TP);
     $('#l2tpModalClose')?.addEventListener('click', closeL2TPForm); $('#l2tpModalCancel')?.addEventListener('click', closeL2TPForm);
     $('#l2tpModalBackdrop')?.addEventListener('click', event => { if (event.target.id === 'l2tpModalBackdrop') closeL2TPForm(); });
+    $('#toggleL2TPPassword')?.addEventListener('click', toggleL2TPPassword);
+    $('#l2tpPassword')?.addEventListener('input', () => { state.l2tpPasswordRevision++; state.l2tpPasswordLoaded = false; });
+    $('#l2tpImportForm')?.addEventListener('submit', importL2TP);
+    $('#l2tpImportClose')?.addEventListener('click', closeL2TPImport); $('#l2tpImportCancel')?.addEventListener('click', closeL2TPImport);
+    $('#l2tpImportBackdrop')?.addEventListener('click', event => { if (event.target.id === 'l2tpImportBackdrop') closeL2TPImport(); });
     document.addEventListener('visibilitychange', syncL2TPPolling);
     document.addEventListener('keydown', event => {
-      if ($('#l2tpModalBackdrop').classList.contains('hidden')) return;
-      if (event.key === 'Escape') { event.preventDefault(); closeL2TPForm(); }
+      const importing = !$('#l2tpImportBackdrop').classList.contains('hidden');
+      if (!importing && $('#l2tpModalBackdrop').classList.contains('hidden')) return;
+      if (event.key === 'Escape') { event.preventDefault(); if (importing) closeL2TPImport(); else closeL2TPForm(); }
       if (event.key === 'Tab') {
-        const controls = $$('button:not(:disabled), input:not(:disabled), textarea:not(:disabled)', $('#l2tpModalBackdrop'));
+        const controls = $$('button:not(:disabled), input:not(:disabled), textarea:not(:disabled)', $(importing ? '#l2tpImportBackdrop' : '#l2tpModalBackdrop'));
         const first = controls[0], last = controls[controls.length - 1];
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }

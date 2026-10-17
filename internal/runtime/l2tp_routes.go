@@ -52,7 +52,7 @@ func l2tpTable(id string) string {
 }
 
 func l2tpRoutePlan(st model.State, statuses map[string]l2tp.Status) []l2tpRoute {
-	if !st.Settings.Enabled {
+	if !st.Settings.Enabled || st.Settings.L2TPDisabled {
 		return nil
 	}
 	var routes []l2tpRoute

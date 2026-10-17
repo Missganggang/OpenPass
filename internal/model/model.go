@@ -113,6 +113,8 @@ type Settings struct {
 	ProxyDNS           bool   `json:"proxy_dns"`
 	DNSFailClosed      bool   `json:"dns_fail_closed"`
 	CustomDNS          string `json:"custom_dns,omitempty"`
+	// False preserves the enabled L2TP module on installations predating this flag.
+	L2TPDisabled bool `json:"l2tp_disabled"`
 }
 
 type State struct {

@@ -15,6 +15,16 @@ import (
 // source_ip routing rules, while the default route follows the configured
 // mode. DNS requests are sent through DoH and never use the LAN resolver.
 func Build(st model.State) ([]byte, error) {
+	if st.Settings.L2TPDisabled {
+		// The module switch suspends connections without forgetting their saved
+		// per-node preference. Do not mutate the caller's shared node slice.
+		st.Nodes = append([]model.Node(nil), st.Nodes...)
+		for i := range st.Nodes {
+			if st.Nodes[i].Type == "l2tp" {
+				st.Nodes[i].Enabled = false
+			}
+		}
+	}
 	dns := dnsProfile(st.Settings.DefaultDNS, st.DNS)
 	// The router may be on a network where overseas DoH endpoints (for
 	// example 1.1.1.1:443) are blocked.  A node whose server is a hostname
@@ -103,7 +113,7 @@ func Build(st model.State) ([]byte, error) {
 	var excludedMACs, excludedInterfaces []string
 	nativeRouterTraffic := false
 	for _, node := range st.Nodes {
-		if node.Type != "l2tp" {
+		if node.Type != "l2tp" || st.Settings.L2TPDisabled {
 			continue
 		}
 		if node.Enabled {

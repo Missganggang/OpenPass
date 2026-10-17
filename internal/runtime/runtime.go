@@ -6,6 +6,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -30,14 +31,15 @@ type Runtime struct {
 	FallbackNFTPath string
 	DisabledPath    string
 
-	closing     atomic.Bool
-	mu          sync.Mutex
-	cmd         *exec.Cmd
-	done        chan struct{}
-	l2tpManager *l2tp.Manager
-	l2tpRoutes  *l2tpRoutes
-	l2tpState   model.State
-	l2tpStop    chan struct{}
+	closing         atomic.Bool
+	mu              sync.Mutex
+	cmd             *exec.Cmd
+	done            chan struct{}
+	l2tpManager     *l2tp.Manager
+	l2tpRoutes      *l2tpRoutes
+	l2tpState       model.State
+	l2tpStop        chan struct{}
+	l2tpModuleError string
 }
 
 type coreStartupLog struct {
@@ -74,12 +76,22 @@ func New(singBoxPath, configPath string) *Runtime {
 // Apply writes the configuration atomically, validates it when sing-box is
 // installed, refreshes the client policy sets, and starts the kernel only when
 // the user explicitly enabled protection.
-func (rt *Runtime) Apply(st model.State) error {
+func (rt *Runtime) Apply(st model.State) (result error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	defer func() {
+		// Keep the most recent apply failure visible across browser reloads.
+		// A saved off switch alone does not prove interface cleanup succeeded.
+		if result != nil {
+			rt.l2tpModuleError = result.Error()
+		} else {
+			rt.l2tpModuleError = ""
+		}
+	}()
 	if rt.closing.Load() || rt.Disabled() {
 		return fmt.Errorf("OpenPass service is stopped")
 	}
+	var transitionErr error
 	transition := st
 	if st.Settings.Enabled {
 		transition.Devices = append([]model.Device(nil), st.Devices...)
@@ -92,6 +104,19 @@ func (rt *Runtime) Apply(st model.State) error {
 		// clients before validating dependencies or writing/checking config:
 		// an early failure must not leave a formerly direct client on the WAN.
 		if err := rt.writeFirewall(transition); err != nil {
+			if !st.Settings.L2TPDisabled {
+				return err
+			}
+			// Still shut down the requested module if a firewall write fails.
+			// The error remains visible, but must not leave dialing/polling on.
+			transitionErr = err
+		}
+	}
+	if st.Settings.L2TPDisabled {
+		// Stop dialing and polling before any later sing-box validation can
+		// fail. Saved per-node connection preferences are retained in state.
+		rt.l2tpState = st
+		if err := errors.Join(transitionErr, rt.cleanupL2TPLocked()); err != nil {
 			return err
 		}
 	}
@@ -130,6 +155,9 @@ func (rt *Runtime) Apply(st model.State) error {
 		return fmt.Errorf("OpenPass service is stopped")
 	}
 	if !st.Settings.Enabled {
+		if st.Settings.L2TPDisabled {
+			return nil // The disabled module was already cleaned up above.
+		}
 		return rt.configureL2TPLocked(st)
 	}
 	if _, err := exec.LookPath(rt.SingBoxPath); err != nil {
@@ -170,8 +198,10 @@ func (rt *Runtime) Apply(st model.State) error {
 		}
 		// Bootstrap netifd's hostname lookup only after the DoH listener is
 		// ready. All proxy clients remain blocked during this transition.
-		if err := rt.configureL2TPLocked(st); err != nil {
-			return err
+		if !st.Settings.L2TPDisabled {
+			if err := rt.configureL2TPLocked(st); err != nil {
+				return err
+			}
 		}
 		if err := rt.writeFirewall(st); err != nil {
 			rt.stopLocked()
@@ -195,10 +225,6 @@ func (rt *Runtime) Shutdown() error {
 	defer rt.mu.Unlock()
 	if err := rt.stopLocked(); err != nil {
 		return err
-	}
-	if rt.l2tpStop != nil {
-		close(rt.l2tpStop)
-		rt.l2tpStop = nil
 	}
 	if err := rt.cleanupL2TPLocked(); err != nil {
 		return err
@@ -349,7 +375,7 @@ func firewallPolicy(st model.State) string {
 		switch d.Mode {
 		case "proxy":
 			if n, ok := l2tpNodes[d.NodeID]; ok {
-				if !n.Enabled {
+				if !n.Enabled || st.Settings.L2TPDisabled {
 					blocked = append(blocked, ip.String())
 					continue
 				}

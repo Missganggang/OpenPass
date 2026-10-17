@@ -37,6 +37,14 @@ func (rt *Runtime) L2TPDependencies() l2tp.Dependencies {
 	return rt.l2tpDependenciesLocked()
 }
 
+// L2TPModuleError is an in-memory result of the last Apply. Reading it never
+// starts dependency checks or netifd queries while the module is disabled.
+func (rt *Runtime) L2TPModuleError() string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.l2tpModuleError
+}
+
 func (rt *Runtime) l2tpDependenciesLocked() l2tp.Dependencies {
 	d := rt.l2tpLocked().Dependencies()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -69,7 +77,7 @@ func (rt *Runtime) l2tpDependenciesLocked() l2tp.Dependencies {
 }
 
 func (rt *Runtime) validateL2TP(st model.State) error {
-	if !st.Settings.Enabled {
+	if !st.Settings.Enabled || st.Settings.L2TPDisabled {
 		return nil
 	}
 	for _, n := range st.Nodes {
@@ -87,6 +95,15 @@ func (rt *Runtime) validateL2TP(st model.State) error {
 func (rt *Runtime) L2TPStatuses(nodes []model.Node) map[string]l2tp.Status {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.l2tpState.Settings.L2TPDisabled {
+		statuses := map[string]l2tp.Status{}
+		for _, n := range nodes {
+			if n.Type == "l2tp" {
+				statuses[n.ID] = l2tp.Status{State: "disabled", Interface: l2tp.InterfaceName(n.ID)}
+			}
+		}
+		return statuses
+	}
 	statuses := rt.l2tpLocked().Statuses(nodes)
 	{
 		// A negotiated PPP session is not usable until its isolated route has
@@ -120,6 +137,9 @@ func (rt *Runtime) ReconnectL2TP(id string) error {
 	if rt.closing.Load() || rt.Disabled() {
 		return fmt.Errorf("OpenPass 已关闭")
 	}
+	if rt.l2tpState.Settings.L2TPDisabled {
+		return fmt.Errorf("请先开启 L2TP 功能")
+	}
 	if err := rt.l2tpLocked().Reconnect(id); err != nil {
 		return err
 	}
@@ -127,6 +147,14 @@ func (rt *Runtime) ReconnectL2TP(id string) error {
 }
 
 func (rt *Runtime) configureL2TPLocked(st model.State) error {
+	rt.l2tpState = st
+	if st.Settings.L2TPDisabled {
+		// Saved nodes must not restart the watcher while the module is off.
+		return rt.cleanupL2TPLocked()
+	}
+	if !st.Settings.Enabled || !hasL2TP(st.Nodes) {
+		rt.stopL2TPWatcherLocked()
+	}
 	// Avoid adding router dependencies to existing installations with no L2TP.
 	if !hasL2TP(st.Nodes) && rt.l2tpManager == nil {
 		if _, err := os.Stat("/var/run/openpass/l2tp-routes.json"); os.IsNotExist(err) {
@@ -137,7 +165,6 @@ func (rt *Runtime) configureL2TPLocked(st model.State) error {
 	if err := manager.Reconcile(st.Nodes, st.Settings.Enabled); err != nil {
 		return err
 	}
-	rt.l2tpState = st
 	if rt.l2tpRoutes == nil {
 		rt.l2tpRoutes = newL2TPRoutes()
 	}
@@ -152,6 +179,9 @@ func (rt *Runtime) configureL2TPLocked(st model.State) error {
 }
 
 func (rt *Runtime) refreshL2TPRoutesLocked() error {
+	if rt.l2tpState.Settings.L2TPDisabled {
+		return nil
+	}
 	statuses := rt.l2tpLocked().Statuses(rt.l2tpState.Nodes)
 	return rt.l2tpRoutes.sync(l2tpRoutePlan(rt.l2tpState, statuses))
 }
@@ -168,7 +198,15 @@ func (rt *Runtime) watchL2TP(stop <-chan struct{}) {
 		case <-ticker.C:
 		}
 		rt.mu.Lock()
-		if rt.closing.Load() || rt.Disabled() {
+		// An old watcher can wake while Apply holds the mutex. Check its
+		// own stop channel again after locking, before querying netifd.
+		select {
+		case <-stop:
+			rt.mu.Unlock()
+			return
+		default:
+		}
+		if rt.closing.Load() || rt.Disabled() || rt.l2tpState.Settings.L2TPDisabled || !rt.l2tpState.Settings.Enabled {
 			rt.mu.Unlock()
 			return
 		}
@@ -193,6 +231,7 @@ func (rt *Runtime) watchL2TP(stop <-chan struct{}) {
 }
 
 func (rt *Runtime) cleanupL2TPLocked() error {
+	rt.stopL2TPWatcherLocked()
 	// The manager scopes discovery to explicitly-owned UCI interfaces; this
 	// also handles a daemon killed before it could record in-memory state.
 	if err := rt.l2tpLocked().Cleanup(true); err != nil {
@@ -202,4 +241,11 @@ func (rt *Runtime) cleanupL2TPLocked() error {
 		rt.l2tpRoutes = newL2TPRoutes()
 	}
 	return rt.l2tpRoutes.sync(nil)
+}
+
+func (rt *Runtime) stopL2TPWatcherLocked() {
+	if rt.l2tpStop != nil {
+		close(rt.l2tpStop)
+		rt.l2tpStop = nil
+	}
 }

@@ -53,3 +53,45 @@ func TestL2TPDataBypassesCoreAndDNSBindsPPP(t *testing.T) {
 		t.Fatal("L2TP must not be tested as a sing-box protocol")
 	}
 }
+
+func TestDisabledL2TPModuleRejectsDNSWithoutChangingOtherNodes(t *testing.T) {
+	st := model.State{Settings: model.DefaultSettings(), DNS: model.DefaultDNS(), Nodes: []model.Node{
+		{ID: "vpn", Type: "l2tp", Enabled: true},
+		{ID: "socks", Type: "socks5", Enabled: true, Address: "192.0.2.50", Port: 1080},
+	}, Devices: []model.Device{
+		{IP: "192.0.2.10", MAC: "02:00:00:00:00:01", Mode: "proxy", NodeID: "vpn", DNS: "cloudflare"},
+		{IP: "192.0.2.11", Mode: "proxy", NodeID: "socks", DNS: "cloudflare"},
+	}}
+	st.Settings.L2TPDisabled, st.Settings.ProxyDNS = true, false
+	b, err := Build(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err = json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !st.Nodes[0].Enabled {
+		t.Fatal("configuration build mutated saved connection preference")
+	}
+	tun := cfg["inbounds"].([]any)[0].(map[string]any)
+	if tun["exclude_uid"] != nil || tun["exclude_interface"] != nil || tun["exclude_mac_address"] != nil {
+		t.Fatal("disabled module still changes TUN capture rules")
+	}
+	outs := cfg["outbounds"].([]any)
+	if hasOutbound(outs, "vpn") || !hasOutbound(outs, "socks") {
+		t.Fatal("wrong nodes were suspended")
+	}
+	dnsRules := cfg["dns"].(map[string]any)["rules"].([]any)
+	blocked := false
+	for _, raw := range dnsRules {
+		rule := raw.(map[string]any)
+		cidrs, _ := rule["source_ip_cidr"].([]any)
+		if len(cidrs) > 0 && cidrs[0] == "192.0.2.10/32" {
+			blocked = rule["action"] == "reject" && rule["server"] == nil
+		}
+	}
+	if !blocked {
+		t.Fatal("disabled L2TP client DNS falls back to WAN")
+	}
+}

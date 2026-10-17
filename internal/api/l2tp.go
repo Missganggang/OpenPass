@@ -129,9 +129,10 @@ func (s *Server) l2tpConnections(ns []model.Node) []l2tpConnection {
 		}
 	}
 	statuses := make(map[string]l2tp.Status)
+	disabled := s.Store.Settings().L2TPDisabled
 	if rt, ok := s.Runtime.(interface {
 		L2TPStatuses([]model.Node) map[string]l2tp.Status
-	}); ok {
+	}); ok && !disabled {
 		statuses = rt.L2TPStatuses(filtered)
 	}
 	counts := make(map[string]int)
@@ -143,7 +144,9 @@ func (s *Server) l2tpConnections(ns []model.Node) []l2tpConnection {
 	out := make([]l2tpConnection, 0, len(filtered))
 	for _, n := range filtered {
 		status, found := statuses[n.ID]
-		if !found {
+		if disabled {
+			status = l2tp.Status{State: "disabled"}
+		} else if !found {
 			status.State = "disconnected"
 			if n.Enabled {
 				status.State = "error"
@@ -167,18 +170,29 @@ func (s *Server) findL2TP(id string) (model.Node, error) {
 
 func (s *Server) l2tp(w http.ResponseWriter, r *http.Request, parts []string) error {
 	if len(parts) == 0 && r.Method == http.MethodGet {
-		deps := s.l2tpDependencies()
-		missing := deps.Missing
-		if missing == nil {
-			missing = []string{}
+		enabled := !s.Store.Settings().L2TPDisabled
+		var dependencies any
+		if enabled {
+			deps := s.l2tpDependencies()
+			missing := deps.Missing
+			if missing == nil {
+				missing = []string{}
+			}
+			dependencies = map[string]any{"available": deps.Ready, "missing": missing}
 		}
-		writeJSON(w, map[string]any{"connections": s.l2tpConnections(s.Store.Nodes()), "dependencies": map[string]any{"available": deps.Ready, "missing": missing}})
+		writeJSON(w, map[string]any{"enabled": enabled, "apply_error": s.l2tpModuleError(), "connections": s.l2tpConnections(s.Store.Nodes()), "dependencies": dependencies})
 		return nil
 	}
 	// Share the device-policy lock with binding and deletion, so no request
 	// can disable/delete a connection in the middle of binding a client.
 	s.discoverMu.Lock()
 	defer s.discoverMu.Unlock()
+	if len(parts) == 1 && parts[0] == "settings" {
+		return s.l2tpSettings(w, r)
+	}
+	if len(parts) == 1 && parts[0] == "import" {
+		return s.l2tpImport(w, r)
+	}
 	if len(parts) == 0 {
 		if r.Method != http.MethodPost {
 			return methodErr()
@@ -230,7 +244,7 @@ func (s *Server) l2tp(w http.ResponseWriter, r *http.Request, parts []string) er
 		if err != nil {
 			return err
 		}
-		if n.Enabled {
+		if n.Enabled && !s.Store.Settings().L2TPDisabled {
 			if err := s.applyL2TPState(); err != nil {
 				return err
 			}
@@ -270,10 +284,17 @@ func (s *Server) l2tpAction(w http.ResponseWriter, r *http.Request, n model.Node
 	if r.Method != http.MethodPost {
 		return methodErr()
 	}
+	if action == "credentials" {
+		writeJSON(w, map[string]string{"address": n.Address, "username": n.Username, "password": n.Password})
+		return nil
+	}
 	if action != "connect" && action != "disconnect" && action != "reconnect" {
 		return &httpError{http.StatusNotFound, "L2TP 操作不存在"}
 	}
 	if action != "disconnect" {
+		if s.Store.Settings().L2TPDisabled {
+			return &httpError{http.StatusConflict, "L2TP 功能已关闭，请先打开 L2TP 功能"}
+		}
 		deps := s.l2tpDependencies()
 		if s.Runtime == nil || !deps.Ready {
 			message := "L2TP 依赖尚未就绪，请在路由器安装或更新所需组件后重试"

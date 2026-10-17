@@ -74,13 +74,19 @@ func (s *Server) self(w http.ResponseWriter, r *http.Request) {
 		settings = s.Store.Settings()
 	}
 	nodes := make([]model.Node, 0)
+	var boundNode map[string]any
 	for _, n := range s.Store.Nodes() {
-		if n.Enabled {
+		if d.NodeID != "" && n.ID == d.NodeID {
+			boundNode = publicNodes([]model.Node{n})[0]
+		}
+		if n.Enabled && (n.Type != "l2tp" || !settings.L2TPDisabled) {
 			nodes = append(nodes, n)
 		}
 	}
 	payload := selfPayload(d, nodes)
+	payload["bound_node"] = boundNode
 	payload["enabled"] = settings.Enabled
+	payload["l2tp_enabled"] = !settings.L2TPDisabled
 	kernelRunning := false
 	if rt, ok := s.Runtime.(interface{ Running() bool }); ok {
 		kernelRunning = rt.Running()

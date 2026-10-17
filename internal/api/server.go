@@ -38,7 +38,7 @@ type Server struct {
 }
 
 func New(s *store.Store) *Server {
-	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.13"}
+	return &Server{Store: s, ConfigPath: "/tmp/openpass-sing-box.json", Version: "0.1.14"}
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 
@@ -198,12 +198,18 @@ func parseDevicePolicyBody(body map[string]json.RawMessage) (devicePolicyRequest
 	return req, nil
 }
 
-func (s *Server) validateNode(id string) error {
+func (s *Server) validateNode(id string, preserveL2TPBinding bool) error {
 	if strings.TrimSpace(id) == "" {
 		return &httpError{http.StatusBadRequest, "代理模式必须选择一个节点"}
 	}
 	for _, n := range s.Store.Nodes() {
 		if n.ID == id {
+			if n.Type == "l2tp" && s.Store.Settings().L2TPDisabled {
+				if preserveL2TPBinding {
+					return nil
+				}
+				return &httpError{http.StatusBadRequest, "L2TP 功能已关闭，请先打开后再绑定设备"}
+			}
 			if !n.Enabled {
 				return &httpError{http.StatusBadRequest, "所选节点已停用"}
 			}
@@ -273,7 +279,7 @@ func (s *Server) saveDevicePolicy(current model.Device, req devicePolicyRequest)
 		}
 	}
 	if mode == "proxy" {
-		if err := s.validateNode(nodeID); err != nil {
+		if err := s.validateNode(nodeID, current.Mode == "proxy" && current.NodeID == nodeID); err != nil {
 			return model.Device{}, err
 		}
 	} else {
@@ -951,6 +957,9 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 	v := s.Store.Settings()
 	if e := decode(r, &v); e != nil {
 		return e
+	}
+	if v.L2TPDisabled != s.Store.Settings().L2TPDisabled {
+		return &httpError{http.StatusBadRequest, "请通过 L2TP 页面的功能开关修改 L2TP 状态"}
 	}
 	if v.DefaultMode == "" {
 		v.DefaultMode = "direct"
