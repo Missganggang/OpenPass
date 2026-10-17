@@ -6,12 +6,126 @@ umask 077
 
 INIT=/etc/init.d/openpass
 MARKER=/etc/openpass/service-disabled
+DAEMON=/usr/bin/openpassd
+MAINTENANCE=/tmp/openpass-maintenance
 
 fail() {
 	json_init
 	json_add_string error "$1"
 	json_dump
 	exit 0
+}
+
+lock_control() {
+	mkdir -p /var/lock || fail '无法创建服务控制目录。'
+	exec 9>/var/lock/openpass-control.lock
+	flock -n 9 || fail 'OpenPass 正在执行其他操作，请稍后重试。'
+}
+
+read_request() {
+	read -r input
+	json_load "$input" || fail '请求格式不正确。'
+}
+
+check_update() {
+	[ -x "$DAEMON" ] || fail 'OpenPass 服务未安装，请重新安装。'
+	# A failed check still returns structured JSON with an actionable error.
+	check_result=$("$DAEMON" -check-update 9>&- 2>/dev/null) || :
+	json_load "$check_result" || fail '无法检查更新，请检查路由器网络后重试。'
+	printf '%s\n' "$check_result"
+}
+
+maintenance_status() {
+	if [ -s "$MAINTENANCE/status.json" ]; then
+		maintenance_result=$(cat "$MAINTENANCE/status.json")
+		json_load "$maintenance_result" || fail '无法读取维护状态。'
+		json_get_var maintenance_state state
+		if [ "$maintenance_state" = running ]; then
+			# The worker alone retains this lock. If it disappeared after a
+			# reboot/crash, report an interruption instead of polling forever.
+			mkdir -p /var/lock || fail '无法读取维护状态。'
+			exec 8>/var/lock/openpass-control.lock
+			if flock -n 8; then
+				json_add_string state error
+				json_add_string message '更新任务已中断，请检查当前版本后重试。'
+				json_dump
+				return
+			fi
+		fi
+		printf '%s\n' "$maintenance_result"
+	else
+		printf '%s\n' '{"state":"idle","action":"update","message":"","version":""}'
+	fi
+}
+
+start_update() {
+	read_request
+	json_get_type kind version
+	[ "$kind" = string ] || fail 'version 必须是版本字符串。'
+	json_get_var requested_version version
+	case "$requested_version" in *[!v0-9.]*) fail '版本格式不正确。' ;; esac
+	printf '%s\n' "$requested_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail '版本格式不正确。'
+	[ -x "$DAEMON" ] && [ -f /usr/share/openpass/maintenance.sh ] && [ -f /usr/share/openpass/update.sh ] || fail '更新组件不完整，请重新安装。'
+	command -v setsid >/dev/null 2>&1 || fail '系统缺少 setsid，无法安全启动后台更新。'
+	lock_control
+	check_result=$("$DAEMON" -check-update 9>&- 2>/dev/null) || :
+	json_load "$check_result" || fail '无法检查最新版本，请稍后重试。'
+	json_get_var check_error error
+	[ -z "$check_error" ] || fail "$check_error"
+	json_get_type available_kind update_available
+	json_get_var available update_available
+	json_get_var latest latest_version
+	[ "$available_kind" = boolean ] && [ "$available" = 1 ] && [ "$requested_version" = "v$latest" ] || fail '版本信息已变化或当前已是最新版，请重新检查更新。'
+	mkdir -p "$MAINTENANCE" || fail '无法创建更新目录。'
+	chmod 0700 "$MAINTENANCE" || fail '无法保护更新目录。'
+	update_work=$(mktemp -d /tmp/openpass-update.XXXXXX) || fail '无法创建更新任务。'
+	if ! cp /usr/share/openpass/maintenance.sh "$update_work/worker.sh" || ! cp /usr/share/openpass/update.sh "$update_work/install.sh"; then
+		rm -rf "$update_work"
+		fail '无法准备更新任务。'
+	fi
+	# Keep fd 9 in the worker, but close all RPC pipes. A private script copy
+	# survives its own replacement and setsid survives an rpcd restart.
+	setsid sh "$update_work/worker.sh" "$requested_version" </dev/null >"$MAINTENANCE/update.log" 2>&1 &
+	attempt=0
+	until [ -e "$update_work/ready" ]; do
+		attempt=$((attempt + 1))
+		[ "$attempt" -lt 4 ] || fail '更新任务未能启动，请检查 /tmp/openpass-maintenance/update.log。'
+		sleep 1
+	done
+	printf '%s\n' '{"accepted":true}'
+}
+
+uninstall() {
+	read_request
+	json_get_type kind confirm
+	json_get_var confirmed confirm
+	[ "$kind" = boolean ] && [ "$confirmed" = 1 ] || fail '必须确认后才能卸载 OpenPass。'
+	json_get_type kind keep_config
+	case "$kind" in
+		boolean) json_get_var keep_config keep_config ;;
+		"") keep_config=1 ;;
+		*) fail 'keep_config 必须是布尔值。' ;;
+	esac
+	[ -f /usr/share/openpass/uninstall.sh ] || fail '卸载组件不存在，请重新安装后重试。'
+	lock_control
+	mkdir -p "$MAINTENANCE" || fail '无法创建卸载日志目录。'
+	uninstall_work=$(mktemp -d /tmp/openpass-uninstall.XXXXXX) || fail '无法创建卸载任务。'
+	if ! cp /usr/share/openpass/uninstall.sh "$uninstall_work/uninstall.sh"; then
+		rm -rf "$uninstall_work"
+		fail '无法准备卸载任务。'
+	fi
+	if [ "$keep_config" = 1 ]; then uninstall_mode=keep; else uninstall_mode=purge; fi
+	# The parent owns the lock while this synchronous command runs. Its copy
+	# remains readable after /usr/share/openpass is removed.
+	if ! sh "$uninstall_work/uninstall.sh" --control-locked "$uninstall_mode" 9>&- >"$MAINTENANCE/uninstall.log" 2>&1; then
+		rm -rf "$uninstall_work"
+		fail '卸载或规则清理失败，已保留可重试组件。请查看 /tmp/openpass-maintenance/uninstall.log。'
+	fi
+	rm -rf "$uninstall_work"
+	json_init
+	json_add_boolean uninstalled 1
+	json_add_boolean config_kept "$keep_config"
+	json_dump
 }
 
 status() {
@@ -23,16 +137,22 @@ status() {
 	if "$INIT" enabled >/dev/null 2>&1; then json_add_boolean enabled 1; else json_add_boolean enabled 0; fi
 	if [ -e "$MARKER" ]; then json_add_boolean stopped 1; else json_add_boolean stopped 0; fi
 	if [ -e "$MARKER" ] && [ "$(cat "$MARKER")" != stopped ]; then json_add_boolean cleanup_pending 1; else json_add_boolean cleanup_pending 0; fi
+	installed_version=$("$DAEMON" -version 9>&- 2>/dev/null) || installed_version=unknown
+	json_add_string version "$installed_version"
 	json_dump
 }
 
 case "$1" in
 	list)
-		printf '%s\n' '{"status":{},"set_enabled":{"enabled":true}}'
+		printf '%s\n' '{"status":{},"set_enabled":{"enabled":true},"check_update":{},"update":{"version":""},"maintenance_status":{},"uninstall":{"keep_config":true,"confirm":true}}'
 		;;
 	call)
 		case "$2" in
 			status) status ;;
+			check_update) lock_control; check_update ;;
+			update) start_update ;;
+			maintenance_status) maintenance_status ;;
+			uninstall) uninstall ;;
 			set_enabled)
 				read -r input
 				json_load "$input" || fail '请求格式不正确。'
@@ -41,8 +161,7 @@ case "$1" in
 				json_get_var requested enabled
 				[ -x "$INIT" ] || fail 'OpenPass 服务未安装，请重新安装或升级。'
 				mkdir -p /var/lock /var/run/openpass /etc/openpass || fail '无法创建服务控制目录。'
-				exec 9>/var/lock/openpass-control.lock
-				flock -n 9 || fail 'OpenPass 正在切换状态，请稍后重试。'
+				lock_control
 				if [ "$requested" = 1 ]; then
 					rm -f "$MARKER" || fail '无法解除关闭状态。'
 					if ! "$INIT" enable 9>&- >/var/run/openpass/control.log 2>&1 || ! "$INIT" start 9>&- >>/var/run/openpass/control.log 2>&1; then

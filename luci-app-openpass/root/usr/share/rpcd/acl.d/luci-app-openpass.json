@@ -1,7 +1,7 @@
 {
   "luci-app-openpass": {
-    "description": "Read and control only the OpenPass service",
-    "read": { "ubus": { "openpass": ["status"] } },
-    "write": { "ubus": { "openpass": ["set_enabled"] } }
+    "description": "Read, control and maintain only OpenPass",
+    "read": { "ubus": { "openpass": ["status", "check_update", "maintenance_status"] } },
+    "write": { "ubus": { "openpass": ["set_enabled", "update", "uninstall"] } }
   }
 }

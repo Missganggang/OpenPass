@@ -25,6 +25,10 @@ grep -Fx 'include "/etc/openpass/firewall-policy*.nft"' "$include" >/dev/null
 grep -Fx 'include "/var/run/openpass/91-openpass-*.nft"' "$include" >/dev/null
 test -f "$work/openpass/scripts/firewall-reload.sh"
 test -f "$work/openpass/scripts/firewall-settings.sh"
+for helper in maintenance.sh uninstall.sh update.sh; do
+	test -x "$work/staged/usr/share/openpass/$helper"
+done
+grep -F 'https://github.com/Missganggang/OpenPass' "$work/staged/usr/share/openpass/update.sh" >/dev/null
 test ! -e "$work/staged/etc/openpass/offloading-backup"
 test "$(stat -c %a "$work/staged/etc/openpass/state.json")" = 600
 test "$(stat -c %a "$work/staged/etc/openpass")" = 700

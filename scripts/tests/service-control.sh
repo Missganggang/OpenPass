@@ -20,7 +20,7 @@ with tempfile.TemporaryDirectory(prefix="openpass-service-test.") as directory:
     work = Path(directory)
     bin_dir = work / "bin"
     bin_dir.mkdir()
-    for path in ["etc/init.d", "etc/openpass", "var/lock", "var/run/openpass", "usr/share/libubox"]:
+    for path in ["etc/init.d", "etc/openpass", "var/lock", "var/run/openpass", "usr/share/libubox", "usr/bin"]:
         (work / path).mkdir(parents=True, exist_ok=True)
     marker = work / "etc/openpass/service-disabled"
     enabled = work / "enabled"
@@ -99,9 +99,12 @@ json_dump() { cat "$TEST_ROOT/response"; printf '\\n'; }
     init = work / "etc/init.d/openpass"
     init.write_text('#!/bin/sh\nexec python3 "$TEST_ROOT/mock.py" init "$@"\n')
     init.chmod(0o755)
+    daemon = work / "usr/bin/openpassd"
+    daemon.write_text('#!/bin/sh\n[ "$1" = -version ] || exit 1\nprintf \'%s\\n\' 0.1.12\n')
+    daemon.chmod(0o755)
     rpc = work / "rpc"
     script = source.read_text()
-    for original in ["/usr/share/libubox/jshn.sh", "/etc/init.d/openpass", "/etc/openpass", "/var/lock", "/var/run/openpass"]:
+    for original in ["/usr/share/libubox/jshn.sh", "/usr/bin/openpassd", "/etc/init.d/openpass", "/etc/openpass", "/var/lock", "/var/run/openpass"]:
         script = script.replace(original, str(work) + original)
     rpc.write_text(script)
     env = dict(os.environ, TEST_ROOT=str(work), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
@@ -142,6 +145,7 @@ json_dump() { cat "$TEST_ROOT/response"; printf '\\n'; }
     assert marker.read_text().strip() == "stopped"
     assert not enabled.exists() and not running.exists()
     response = invoke("status")
+    assert response["version"] == "0.1.12", response
     assert response["running"] is False and response["enabled"] is False and response["stopped"] is True, response
     assert not response.get("cleanup_pending", False), response
 

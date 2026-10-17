@@ -2,7 +2,7 @@
 # Build a static, self-contained OpenWrt release archive.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${VERSION:-0.1.11}
+VERSION=${VERSION:-0.1.12}
 ARCH=${ARCH:-amd64}
 GO=${GO:-go}
 OUT_DIR=${OUT_DIR:-$ROOT/dist}
@@ -30,6 +30,8 @@ cp "$ROOT/openwrt/92-openpass-policy.nft" "$PKGROOT/usr/share/nftables.d/ruleset
 cp -R "$ROOT/luci-app-openpass/." "$PKGROOT/luci-app-openpass/"
 [ -f "$PKGROOT/luci-app-openpass/htdocs/luci-static/resources/view/openpass/service.js" ] || { echo "LuCI JavaScript view is missing" >&2; exit 1; }
 cp "$ROOT/scripts/install.sh" "$ROOT/scripts/firewall-reload.sh" "$ROOT/scripts/firewall-settings.sh" "$ROOT/scripts/backup.sh" "$ROOT/scripts/restore.sh" "$PKGROOT/scripts/"
+cp "$ROOT/scripts/maintenance.sh" "$ROOT/scripts/uninstall.sh" "$PKGROOT/scripts/"
+cp "$ROOT/install.sh" "$PKGROOT/scripts/update.sh"
 cat >"$PKGROOT/install.sh" <<'SH'
 #!/bin/sh
 exec sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/scripts/install.sh" "$@"

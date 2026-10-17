@@ -25,7 +25,8 @@ func (rt *Runtime) CleanupDisabled() error {
 	for {
 		pids, err := matchingProcesses(func(args []string) bool {
 			return len(args) > 0 && filepath.Base(args[0]) == "openpassd" &&
-				!hasFlag(args, "cleanup") && flagValue(args, "config", "/var/etc/openpass/sing-box.json") == rt.ConfigPath
+				!hasFlag(args, "cleanup") && !hasFlag(args, "check-update") && !hasFlag(args, "version") &&
+				flagValue(args, "config", "/var/etc/openpass/sing-box.json") == rt.ConfigPath
 		})
 		if err != nil {
 			return err

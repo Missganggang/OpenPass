@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -14,9 +15,10 @@ import (
 	"openpass/internal/api"
 	openruntime "openpass/internal/runtime"
 	"openpass/internal/store"
+	"openpass/internal/update"
 )
 
-var version = "0.1.11"
+var version = "0.1.12"
 
 func main() {
 	listen := flag.String("listen", ":8787", "HTTP listen address")
@@ -26,10 +28,22 @@ func main() {
 	singBoxPath := flag.String("sing-box", "/usr/bin/sing-box", "sing-box executable")
 	nftPath := flag.String("nft", "/var/run/openpass/91-openpass-dynamic.nft", "dynamic nftables policy file")
 	showVersion := flag.Bool("version", false, "print version")
+	checkUpdate := flag.Bool("check-update", false, "check the latest official release and print JSON without starting services")
 	cleanup := flag.Bool("cleanup", false, "clean disabled OpenPass service after procd stops it")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
+		return
+	}
+	if *checkUpdate {
+		result, err := update.Check(version)
+		if err != nil {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"error": err.Error()})
+			os.Exit(1)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 	rt := openruntime.New(*singBoxPath, *configPath)

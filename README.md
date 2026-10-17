@@ -30,7 +30,11 @@ curl -fL https://raw.githubusercontent.com/Missganggang/OpenPass/main/install.sh
 
 - 管理页面：`http://路由器内网地址:8787/`
 - 设备自助页：`http://路由器内网地址:8787/choose`
-- LuCI：**服务 → OpenPass**，可打开以上页面，也可开启或关闭整个 OpenPass 服务。
+- LuCI：**服务 → OpenPass**，显示当前版本，可打开以上页面、开启或关闭服务、检查更新和卸载 OpenPass。
+
+点击 **检查更新** 会查询官方 GitHub 最新正式版本，显示当前版本与最新版本；有新版时可确认升级。升级按路由器架构下载并校验 SHA256，保留节点、设备和 DNS 配置；原本关闭的服务升级后仍保持关闭。下载或检查失败会明确提示，不会误报“已是最新版本”。
+
+点击 **卸载 OpenPass** 后需要确认。默认保留节点、订阅和设备配置，可取消保留以彻底删除配置。卸载先停用服务并清理 OpenPass 的代理、DNS 和防火墙规则，再移除程序及 LuCI 入口；网络清理失败时保留程序以便重试。共享的 sing-box 及其他代理插件不会被卸载。卸载操作不会自动恢复防火墙转发加速选项。
 
 LuCI 的 **关闭 OpenPass** 会停止管理后台及它启动的 sing-box，撤销 OpenPass 的 DNS 接管与设备阻断规则，并关闭开机自启；管理页和设备自助页此时均无法访问，可再使用其他代理软件。节点、设备和 DNS 配置保留，路由器重启或升级 OpenPass 后仍保持关闭。需要恢复时，在 LuCI 点击 **开启 OpenPass**，按原配置启动并恢复开机自启。此服务开关独立于管理页中的“全局保护”开关；LuCI 自身仍可访问。
 
@@ -43,7 +47,7 @@ LuCI 的 **关闭 OpenPass** 会停止管理后台及它启动的 sing-box，撤
 固定安装某个版本：
 
 ```sh
-OPENPASS_VERSION=v0.1.11 sh /tmp/openpass-install.sh
+OPENPASS_VERSION=v0.1.12 sh /tmp/openpass-install.sh
 ```
 
 ## 当前功能
@@ -123,7 +127,7 @@ go run ./cmd/openpass -listen 127.0.0.1:8787 -state ./state.json -web ./web -con
 在 Linux / WSL 或具备 POSIX shell 的开发环境构建两个架构的完整便携包：
 
 ```sh
-make packages VERSION=0.1.11
+make packages VERSION=0.1.12
 # dist/openpass-linux-amd64.tar.gz
 # dist/openpass-linux-386.tar.gz
 # dist/SHA256SUMS

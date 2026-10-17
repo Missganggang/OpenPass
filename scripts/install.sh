@@ -54,6 +54,13 @@ for required in "$BINARY" "$WEB/index.html" "$WEB/app.js" "$WEB/styles.css" "$IN
 	[ -f "$required" ] || fail "Required package file is missing: $required"
 done
 
+for helper in maintenance.sh uninstall.sh; do
+	[ -f "$ROOT/scripts/$helper" ] || fail "Required maintenance helper is missing: $helper"
+done
+UPDATE_HELPER="$ROOT/scripts/update.sh"
+[ -f "$UPDATE_HELPER" ] || UPDATE_HELPER="$ROOT/install.sh"
+[ -f "$UPDATE_HELPER" ] || fail "The update downloader is missing."
+
 if [ -z "$DESTDIR" ]; then
 	[ "$(id -u)" = 0 ] || fail "Run this installer as root."
 	[ -f /etc/openwrt_release ] || fail "This installer supports OpenWrt only."
@@ -67,6 +74,7 @@ if [ -z "$DESTDIR" ]; then
 	[ -s /etc/ssl/certs/ca-certificates.crt ] || dependencies="$dependencies ca-bundle"
 	[ -f /www/luci-static/resources/luci.js ] || dependencies="$dependencies luci"
 	command -v flock >/dev/null 2>&1 || dependencies="$dependencies flock"
+	command -v setsid >/dev/null 2>&1 || dependencies="$dependencies setsid"
 	if [ -n "$dependencies" ]; then
 		echo "Installing dependencies:$dependencies"
 		if command -v opkg >/dev/null 2>&1; then
@@ -103,6 +111,9 @@ cp "$WEB/index.html" "$WEB/app.js" "$WEB/styles.css" "$PREFIX/share/openpass/web
 chmod 0644 "$PREFIX/share/openpass/web/"*
 cp "$ROOT/scripts/backup.sh" "$ROOT/scripts/restore.sh" "$PREFIX/share/openpass/"
 chmod 0755 "$PREFIX/share/openpass/backup.sh" "$PREFIX/share/openpass/restore.sh"
+cp "$ROOT/scripts/maintenance.sh" "$ROOT/scripts/uninstall.sh" "$PREFIX/share/openpass/"
+cp "$UPDATE_HELPER" "$PREFIX/share/openpass/update.sh"
+chmod 0755 "$PREFIX/share/openpass/maintenance.sh" "$PREFIX/share/openpass/uninstall.sh" "$PREFIX/share/openpass/update.sh"
 cp "$INIT" "$ETC/init.d/openpass"
 chmod 0755 "$ETC/init.d/openpass"
 cp "$NFT" "$ETC/nftables.d/90-openpass.nft"
@@ -169,8 +180,9 @@ if [ -z "$DESTDIR" ]; then
 	/etc/init.d/openpass enable
 	/etc/init.d/openpass restart || fail "OpenPass could not be started. Inspect logread -e openpass."
 	fi
-	# Reload ACLs and discover the one-shot service-control plugin.
-	/etc/init.d/rpcd restart || fail "Could not register the LuCI service-control RPC."
+	# HUP reloads plugins/ACLs while preserving LuCI login sessions, allowing
+	# the update page to keep polling after this installer completes.
+	/etc/init.d/rpcd reload || fail "Could not register the LuCI service-control RPC."
 	rpc_attempt=0
 	until ubus -S list openpass 2>/dev/null | grep -qx openpass; do
 		rpc_attempt=$((rpc_attempt + 1))
